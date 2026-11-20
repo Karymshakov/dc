@@ -134,10 +134,19 @@ def test_module_ships_disabled(monkeypatch, tmp_path):
     ("on", True), ("да", True),
     ("0", False), ("false", False), ("no", False), ("", False),
 ])
-def test_flag_reads_the_switch(monkeypatch, value, expected):
-    monkeypatch.setenv("REPHRASE_ENABLED", value)
+def test_flag_reads_the_switch(monkeypatch, tmp_path, value, expected):
+    """Какие значения считаются «включено».
 
-    assert module.flag("REPHRASE_ENABLED") is expected
+    Файл `.env` подставляется пустой намеренно. Раньше тест читал файл
+    разработчика и падал у того, кто включил переформулировку у себя:
+    пустое значение переменной — это «не задано», и поиск уходил в
+    настоящий `.env`. Проверять надо разбор значения, а не чужую машину.
+    """
+    monkeypatch.setenv("REPHRASE_ENABLED", value)
+    empty = tmp_path / ".env"
+    empty.write_text("", encoding="utf-8")
+
+    assert module.flag("REPHRASE_ENABLED", empty) is expected
 
 
 def test_disabled_makes_no_calls_at_all(monkeypatch, by_id):

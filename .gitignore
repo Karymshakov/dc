@@ -26,3 +26,8 @@ Thumbs.db
 bot.log
 bot_out.log
 bot_err.log
+
+# Рабочие материалы команды, в поставку не входят
+.claude/
+CONTRIBUTING.md
+docs/HANDOFF.md

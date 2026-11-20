@@ -317,17 +317,22 @@ faq_bot/
   context.py               контекст диалога по chat_id
   stats.py                 /stats
   presentation.py          меню, карточка, светофор
+  rephrase.py              переформулировка моделью, выключена по умолчанию
   bot.py                   Telegram
+  handoff.py               передача оператору в его чат и ответ абоненту
   speech.py                голосовые через Gemini
   bot_rules.json           тексты и правила, настраиваются без кода
 tools/
   split.py                 деление на tune и holdout
   evaluate.py              top-1, top-3, язык, внецелевые
-tests/                     проверки правил
+  check.py                 полная проверка одной командой
+  run_bot.py               запуск ровно одного экземпляра бота
+tests/                     634 проверки правил
 data/05_support/           faq.json, размеченные наборы
 docs/
   PLAN.md                  задача, пороги, архитектура
   DECISIONS.md             реестр решений с доказательствами
+  DEMO.md                  сценарий защиты
   ui-preview.html          макет интерфейса
 ```
 
@@ -339,6 +344,7 @@ python -m faq_bot.ranking --errors          # сравнение двух мет
 python -m pytest -q                         # тесты
 python main.py ask "Balansymdy kantip korom"
 python main.py ask "а сколько стоит?" --chat 7
+python tools/check.py                       # контракт, точность, тесты, секреты
 ```
 
 ## Команда и источники
