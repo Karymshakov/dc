@@ -816,8 +816,42 @@ def screen_for_text(text: str,
 
     if reply.faq_id is None:
         screen = _maybe_offer_operator(screen, chat_id, reply)
+    elif not revision:
+        # Тема найдена, обёрток не добавлялось, абонент ещё не дописывал:
+        # эту карточку переформулировка вправе переписать. Дозревание
+        # исключено намеренно — там к карточке приклеена пометка о
+        # правке, и собрать её заново здесь нечем.
+        _note_for_polish(chat_id, stripped, reply)
     conversation().serve(chat_id, reply.faq_id)
     return screen
+
+
+#: Последний показанный ответ чата: вопрос абонента и разбор.
+#:
+#: Нужен переформулировке, которая идёт ПОСЛЕ отправки ответа и поэтому
+#: не может получить разбор возвратом из `screen_for_text`. Запись
+#: кладётся ровно в одном месте — там, где экран гарантированно собран
+#: простой карточкой `answer_card(reply)` без обёрток. Это и есть
+#: условие безопасности: переписывать можно только то, что мы умеем
+#: собрать заново.
+_POLISH: dict[str, tuple[str, Reply]] = {}
+
+#: Чатов в памяти. Та же причина, что у остальных пределов: процесс
+#: живёт долго, словарь без потолка растёт молча.
+POLISH_CHATS = 200
+
+
+def _note_for_polish(chat_id: int | str | None, question: str,
+                     reply: Reply) -> None:
+    """Запомнить вопрос и разбор для последующей переформулировки."""
+    if len(_POLISH) >= POLISH_CHATS:
+        _POLISH.clear()
+    _POLISH[_key(chat_id)] = (question, reply)
+
+
+def _take_for_polish(chat_id: int | str | None) -> tuple[str, Reply] | None:
+    """Забрать запись: переформулировка полагается ровно одна на вопрос."""
+    return _POLISH.pop(_key(chat_id), None)
 
 
 def _maybe_offer_operator(screen: Screen, chat_id: int | str | None,
@@ -1146,6 +1180,55 @@ async def _rewrite(sent: Any, screen: Screen) -> str:
     return await _apply(editor, screen)
 
 
+async def _polish(chat_id: int | str | None, handle: Any) -> None:
+    """Переписать показанный ответ формулировкой модели. Бонус ТЗ.
+
+    Порядок намеренный и он здесь главное. Сначала абонент **мгновенно**
+    получает дословный ответ из базы: поиск правиловый, 0,8 мс, денег не
+    стоит. Только потом, если модель включена, тот же ответ
+    переписывается под его формулировку — правкой того же сообщения.
+
+    Наоборот было бы хуже: ждать сетевой вызов на глазах у абонента
+    значит ухудшить ответ ради его улучшения. Здесь ожидания нет вовсе.
+
+    При любой неудаче не происходит ничего, и это не обработка ошибок, а
+    устройство: модуль :mod:`faq_bot.rephrase` при отказе возвращает
+    дословный текст базы, а мы правим сообщение только когда он отдал
+    формулировку, прошедшую всех сторожей (`source == LLM`). Выключено,
+    нет ключа, нет сети, таймаут, сторож фактов поймал чужой код, модель
+    приписала цифру, съехала на другой язык, разговорилась вдвое — на
+    экране остаётся текст из базы, и абонент ничего не замечает.
+    """
+    from . import rephrase          # ключ и сеть нужны не каждому запуску
+
+    noted = _take_for_polish(chat_id)
+    if noted is None or handle is None or not rephrase.ENABLED:
+        return
+    question, reply = noted
+    if reply.entry is None:                        # pragma: no cover
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            rephrase.rephrase, question, reply.entry, reply.lang,
+            chat_id=_key(chat_id))
+    except Exception as error:                     # последний рубеж
+        logger.warning("переформулировка не удалась: %s", error)
+        return
+
+    if result.source != rephrase.LLM:
+        logger.info("чат %s: показан текст базы, модель не применена (%s)",
+                    chat_id, result.reason or "сторож фактов")
+        return
+
+    logger.info("чат %s: ответ переформулирован моделью%s",
+                chat_id, " (из кеша)" if result.cached else "")
+    screen = presentation.answer_card(reply, body=result.text)
+    if await _rewrite(handle, screen) == "failed":
+        logger.info("чат %s: переписать ответ не удалось, остался базовый",
+                    chat_id)
+
+
 # --------------------------------------------------------------------------
 # Передача оператору: карточка в его чат и реплай обратно абоненту
 # --------------------------------------------------------------------------
@@ -1359,6 +1442,9 @@ async def _on_text(update: Any, context: Any) -> None:
         return
     flow.opened(chat_id, text, await _send(message, screen))
     await _note_handoff(context, chat_id, screen, flow.handle(chat_id))
+    # Ответ уже у абонента. Переформулировка — отдельным шагом после,
+    # чтобы сетевой вызов не задерживал показ готового ответа.
+    await _polish(chat_id, flow.handle(chat_id))
 
 
 #: Какое уведомление показать на каждый неудачный статус распознавания.
@@ -1469,6 +1555,10 @@ async def _on_voice(update: Any, context: Any) -> None:
     screen = screen_for_text(heard, chat_id, metered=False)
     if screen is None:                             # pragma: no cover
         return
+    # Карточка голосового обёрнута эхом услышанного, собрать её заново
+    # переформулировке нечем. Запись снимаем, чтобы она не досталась
+    # следующему сообщению этого чата.
+    _take_for_polish(chat_id)
     await _deliver(message, waiting,
                    presentation.with_heard(screen, heard,
                                            chat_language(chat_id)))

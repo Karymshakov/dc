@@ -417,6 +417,29 @@ def invented_numbers(text: str, entry: FaqEntry) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for item in found if item not in allowed))
 
 
+def dropped_numbers(text: str, base: str) -> tuple[str, ...]:
+    """Числа ответа базы, которых в переформулировке не стало.
+
+    Правило «новых цифр не бывает» несимметрично, и одного его мало.
+    Замер на настоящей модели, шесть разговорных вопросов: из четырёх
+    принятых переформулировок ДВЕ молча выбросили цену. «Разовый сбор
+    50 сом» стал «разовым сбором», «1 ГБ — 30 сом, 5 ГБ — 100 сом» —
+    «нужным объёмом». Сторож связей это пропускает: он проверяет, что
+    показанный факт принадлежит теме, а не что он вообще показан.
+
+    Добавленная цифра — выдумка, потерянная — обман умолчанием: абонент
+    уходит, не узнав, сколько это стоит, и узнает из счёта. Для
+    справочной оператора связи это одинаково непригодно.
+
+    Сравнение с ответом на языке абонента, а не со всей записью: второй
+    перевод абоненту не показывали, и требовать его чисел не за что.
+    """
+    required = DIGITS_PATTERN.findall(base)
+    present = set(DIGITS_PATTERN.findall(text))
+    return tuple(dict.fromkeys(item for item in required
+                               if item not in present))
+
+
 def _rejection(text: str, entry: FaqEntry, language: str,
                base: str) -> tuple[str, consistency.Verdict] | None:
     """Почему переформулировку нельзя показывать. None — можно.
@@ -431,6 +454,10 @@ def _rejection(text: str, entry: FaqEntry, language: str,
     invented = invented_numbers(text, entry)
     if invented:
         return f"выдуманные числа: {', '.join(invented)}", verdict
+
+    dropped = dropped_numbers(text, base)
+    if dropped:
+        return f"потерянные числа: {', '.join(dropped)}", verdict
 
     if len(text) > MAX_LENGTH_RATIO * len(base):
         return (f"длиннее исходного в {len(text) / len(base):.1f} раза",
