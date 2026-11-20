@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-COPIED = ("src", "tests", "data", "pytest.ini", "main.py")
+COPIED = ("src", "tests", "data", "vendor", "pytest.ini", "main.py")
 
 
 @dataclass(frozen=True)
@@ -92,6 +92,49 @@ MUTANTS: tuple[Mutant, ...] = (
     Mutant("M20", "расстояние считается гаверсинусом, а не евклидом",
            "geo.py", "return 2.0 * earth_radius_m * math.asin(math.sqrt(a))",
            "return earth_radius_m * math.sqrt(dphi ** 2 + dlambda ** 2)"),
+
+    # Мутанты ниже добавлены после того, как адвокат дьявола провёл их мимо
+    # всех проверок. Каждый ломает то, что реально попадает к жюри: файл на
+    # диске, отрисованную страницу или число в бонусном отчёте.
+    Mutant("M21", "цвет прямоугольника следует медиане клетки",
+           "mapping.py", "COLORS[cell.color]", 'COLORS["green"]'),
+    Mutant("M22", "сгенерированный JavaScript синтаксически корректен",
+           "mapping.py", "DATA.cells.forEach(function (c) {",
+           "DATA.cells.forEach(function (c) "),
+    Mutant("M23", "подпись «сильный» стоит у максимума медиан",
+           "mapping.py", "<span>сильный __HEAT_MAX__</span>",
+           "<span>сильный __HEAT_MIN__</span>"),
+    Mutant("M24", "полоска легенды идёт от холодного к горячему",
+           "mapping.py", "linear-gradient(90deg", "linear-gradient(270deg"),
+    Mutant("M25", "палитра canvas не инвертирована",
+           "mapping.py", "[[stop, color] for stop, color in HEAT_GRADIENT]",
+           "[[1.0 - stop, color] for stop, color in HEAT_GRADIENT]"),
+    Mutant("M26", "иконки маркеров заданы явно, а не угадываются",
+           "mapping.py", 'L.Icon.Default.imagePath = "";', ""),
+    Mutant("C01", "бонус считается по той же выборке, что и ответ",
+           "cli.py", "compare_day_night(measurements, result.bounds)",
+           "compare_day_night(measurements[::2], result.bounds)"),
+    Mutant("C02", "бонус пишется в свой файл, а не поверх result.json",
+           "cli.py", 'bonus_path = out_dir / "bonus_day_night.json"',
+           'bonus_path = out_dir / "result.json"'),
+    Mutant("D01", "медианный модуль сдвига — median(|x|), а не |median(x)|",
+           "daynight.py", "median(abs(shift) for shift in shifts)",
+           "abs(median(shifts))"),
+    Mutant("D02", "числа бонусного отчёта округляются до сотых",
+           "daynight.py", "round(value, 2)", "round(value, 0)"),
+)
+
+# Нулевой мутант: меняет только текст докстринга, поведения не меняет ничем.
+# Он обязан ВЫЖИТЬ. Если он «умирает» — значит прогон падает сам по себе
+# (не скопирован нужный каталог, не установлен pytest, сломано окружение),
+# и тогда инструмент объявляет мёртвым что угодно, включая настоящие дыры.
+# Ровно это однажды и случилось: vendor/ перестал копироваться после того,
+# как Leaflet начал встраиваться в страницу из этого каталога, и прогон
+# рапортовал «убито 20 из 20» при неработающем оракуле.
+NULL_MUTANT = Mutant(
+    "NULL", "самопроверка инструмента: поведение не изменено", "grid.py",
+    '"""Агрегация замеров в клетки сетки 200 м."""',
+    '"""Агрегация замеров в клетки сетки 200 м. (нулевой мутант)"""',
 )
 
 
@@ -164,6 +207,20 @@ def main(argv: list[str] | None = None) -> int:
     if not selected:
         print("Ни один мутант не подошёл под фильтр")
         return 1
+
+    # Сначала проверяем сам инструмент. Если нулевой мутант «умирает»,
+    # прогон падает по своей причине, и все остальные вердикты недостоверны.
+    print("Самопроверка инструмента (нулевой мутант обязан выжить)...")
+    null_verdict, null_tests, null_reference = check_mutant(NULL_MUTANT)
+    if null_verdict != "ВЫЖИЛ":
+        print(f"  pytest={null_tests}  эталон={null_reference}  вердикт={null_verdict}")
+        print()
+        print("ИНСТРУМЕНТ НЕИСПРАВЕН: прогон падает ещё до мутации, поэтому")
+        print("любой мутант был бы объявлен мёртвым. Результаты недостоверны.")
+        print("Проверьте, что установлен pytest и что COPIED содержит все")
+        print("каталоги, нужные для запуска (src, tests, data, vendor).")
+        return 1
+    print("  инструмент исправен\n")
 
     print(f"Мутантов к проверке: {len(selected)}")
     print(f"{'id':<5} {'правило':<58} {'pytest':<8} {'эталон':<10} вердикт")
