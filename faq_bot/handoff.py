@@ -59,6 +59,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
+from .bounded import BoundedDict
 from .presentation import (
     LANGUAGE_NAMES,
     Screen,
@@ -215,7 +216,7 @@ class HandoffDesk:
         self._limit = max(1, int(limit))
         self._clock = clock
         self._counter = 0
-        self._turns: dict[str, _LastTurn] = {}
+        self._turns: BoundedDict[str, _LastTurn] = BoundedDict()
         self._pending: dict[str, Ticket] = {}
         self._cards: OrderedDict[int, Ticket] = OrderedDict()
 

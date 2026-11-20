@@ -74,6 +74,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config, handoff, presentation
+from .bounded import BoundedDict, BoundedSet
 from .answer import (
     MEMORY,
     STATS,
@@ -127,11 +128,11 @@ NO_LIBRARY_MESSAGE = (
 )
 
 # Язык интерфейса по чатам: последний определённый или выбранный кнопкой.
-_chat_language: dict[str, str] = {}
+_chat_language: BoundedDict[str, str] = BoundedDict()
 # Чаты, где язык выбран кнопкой вручную: автоопределение больше не спорит.
-_chat_language_pinned: set[str] = set()
+_chat_language_pinned: BoundedSet[str] = BoundedSet()
 # Сколько реплик подряд в чате явно написаны на другом языке.
-_chat_language_streak: dict[str, int] = {}
+_chat_language_streak: BoundedDict[str, int] = BoundedDict()
 
 
 def _key(chat_id: int | str | None) -> str:
@@ -274,8 +275,8 @@ class ThrottleGuard:
         self._limit = limit
         self._window = window
         self._clock = clock
-        self._sent: dict[str, list[float]] = {}
-        self._warned: set[str] = set()
+        self._sent: BoundedDict[str, list[float]] = BoundedDict()
+        self._warned: BoundedSet[str] = BoundedSet()
 
     @property
     def limit(self) -> int:
@@ -417,9 +418,9 @@ class ConversationFlow:
         self._repeat_window = repeat_window
         self._escalate_after = escalate_after
         self._clock = clock
-        self._pending: dict[str, Pending] = {}
-        self._served: dict[str, Served] = {}
-        self._rejected: dict[str, Rejected] = {}
+        self._pending: BoundedDict[str, Pending] = BoundedDict()
+        self._served: BoundedDict[str, Served] = BoundedDict()
+        self._rejected: BoundedDict[str, Rejected] = BoundedDict()
 
     # --- пороги: явные значения для тестов, иначе из bot_rules.json ------
 
@@ -834,18 +835,12 @@ def screen_for_text(text: str,
 #: простой карточкой `answer_card(reply)` без обёрток. Это и есть
 #: условие безопасности: переписывать можно только то, что мы умеем
 #: собрать заново.
-_POLISH: dict[str, tuple[str, Reply]] = {}
-
-#: Чатов в памяти. Та же причина, что у остальных пределов: процесс
-#: живёт долго, словарь без потолка растёт молча.
-POLISH_CHATS = 200
+_POLISH: BoundedDict[str, tuple[str, Reply]] = BoundedDict()
 
 
 def _note_for_polish(chat_id: int | str | None, question: str,
                      reply: Reply) -> None:
     """Запомнить вопрос и разбор для последующей переформулировки."""
-    if len(_POLISH) >= POLISH_CHATS:
-        _POLISH.clear()
     _POLISH[_key(chat_id)] = (question, reply)
 
 
