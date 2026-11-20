@@ -236,7 +236,7 @@ h3 { font-size: 15px; letter-spacing: -.012em; }
 .chat-actions { display: flex; gap: 8px; align-items: center; }
 
 .messages { flex: 1; overflow-y: auto; padding: 16px 24px 12px; display: flex; flex-direction: column; overscroll-behavior: contain; }
-.messages > *, .demo-screen > * { flex: none; }
+.messages > * { flex: none; }
 .load-more { align-self: center; margin-bottom: 10px; }
 .day { align-self: center; margin: 16px 0 6px; font-size: 11.5px; font-weight: 600; color: var(--muted); letter-spacing: .01em; }
 .sys { align-self: center; margin: 10px 0; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px;
@@ -396,32 +396,6 @@ button.tagchip.teach:hover { background: var(--yellow-press); }
 .op-row .avatar { width: 30px; height: 30px; font-size: 11.5px; }
 .op-row b { font-weight: 600; font-variant-numeric: tabular-nums; }
 
-/* ---------- демо-клиент: окно телефона ---------- */
-.demo { position: fixed; right: 20px; bottom: 20px; z-index: 40; width: 360px; height: min(660px, calc(100vh - 40px));
-  background: var(--surface); border-radius: 28px; box-shadow: var(--pop-shadow);
-  display: flex; flex-direction: column; overflow: hidden; animation: pop .14s ease-out; }
-.demo-head { display: flex; align-items: center; gap: 2px; padding: 14px 10px 12px 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
-.demo-head > div { flex: 1; display: grid; }
-.demo-head b { font-size: 15px; font-weight: 600; letter-spacing: -.012em; }
-.demo-head .muted { font-size: 12px; }
-.demo-screen { flex: 1; overflow-y: auto; padding: 14px 12px; display: flex; flex-direction: column; gap: 4px; background: var(--surface-2); }
-.d-msg { max-width: 82%; padding: 7px 12px; border-radius: 17px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.38; margin-top: 4px; }
-.d-msg.me { align-self: flex-end; background: var(--yellow); color: #000; }
-.d-msg.them { align-self: flex-start; background: var(--bubble-in); }
-.d-msg.op { box-shadow: inset 0 0 0 1px var(--strong); background: var(--surface); }
-.d-msg small { display: block; font-size: 11px; color: var(--muted); margin-bottom: 1px; font-weight: 500; }
-.d-btns { align-self: flex-start; display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 4px; width: 82%; margin-top: 2px; }
-.d-btns button { padding: 7px 8px; border-radius: 10px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line-strong); font-size: 12.5px; font-weight: 500; text-align: center; transition: background-color .1s; }
-.d-btns button:hover { background: var(--fill); }
-.d-sys { align-self: center; font-size: 11.5px; color: var(--muted); margin: 8px 0; text-align: center; }
-.demo-input { display: flex; gap: 6px; padding: 8px 10px 6px; background: var(--surface); }
-.demo-input input { flex: 1; min-width: 0; height: 34px; border-radius: 17px; border: 0; box-shadow: inset 0 0 0 1px var(--line-strong); background: var(--surface); padding: 0 14px; font-size: 13.5px; color: var(--text); }
-.demo-input input:focus { outline: none; box-shadow: inset 0 0 0 1px var(--strong); }
-.demo-hints { display: flex; gap: 6px; padding: 4px 10px 14px; overflow-x: auto; scrollbar-width: none; background: var(--surface); }
-.demo-hints::-webkit-scrollbar { display: none; }
-.demo-hints button { flex: none; height: 26px; padding: 0 10px; border-radius: 13px; background: var(--fill); font-size: 12px; color: var(--text-2); transition: background-color .1s; }
-.demo-hints button:hover { background: var(--fill-2); }
-
 /* ---------- уведомления ---------- */
 .toasts { position: fixed; z-index: 60; left: 50%; top: 16px; transform: translateX(-50%); display: grid; gap: 8px; width: min(420px, calc(100vw - 32px)); pointer-events: none; }
 .toast { pointer-events: auto; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: saturate(180%) blur(24px); -webkit-backdrop-filter: saturate(180%) blur(24px);
@@ -471,10 +445,57 @@ button.tagchip.teach:hover { background: var(--yellow-press); }
   .page-head { flex-direction: column; align-items: flex-start; }
   .page-head h2 { font-size: 24px; }
   .info-pane { width: 100%; }
-  .demo { right: 8px; left: 8px; bottom: 68px; width: auto; height: calc(100vh - 88px); border-radius: 20px; }
   .popover { width: calc(100vw - 32px); left: 16px !important; }
   .hours { gap: 2px; padding: 12px 12px 30px; }
   .hour i { display: none; }
   .hour:nth-child(6n+1) i { display: block; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* ---------- графика ---------- */
+.logo { width: 34px; height: 34px; display: block; }
+.rail-logo { margin-bottom: 14px; }
+.ill { color: var(--muted); fill: var(--yellow); display: block; }
+.empty .ill { width: 112px; height: 84px; margin: 0 auto 12px; }
+.empty-ill { width: 168px; height: 126px; margin-bottom: 8px; }
+.login-ill { width: 200px; height: 150px; margin: 0 0 18px -6px; color: var(--text-2); }
+.login-brand { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; letter-spacing: -.01em; }
+.login-brand .logo { width: 24px; height: 24px; }
+
+/* ---------- прелоадер ---------- */
+.preloader { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: var(--bg);
+  transition: opacity .35s ease, visibility .35s; }
+.preloader.done { opacity: 0; visibility: hidden; }
+.preloader > * { grid-area: 1 / 1; }
+.preloader img { width: min(176px, 45vw); height: auto; border-radius: 32px; background: #fff;
+  box-shadow: 0 0 0 1px var(--line); }
+.preloader img:not([hidden]) + .preloader-mark { display: none; }
+.preloader-mark { width: 64px; height: 64px; }
+.preloader-mark rect[class] { transform-box: fill-box; transform-origin: 50% 100%; animation: signal 1.2s ease-in-out infinite; }
+.preloader-mark .b2 { animation-delay: .15s; }
+.preloader-mark .b3 { animation-delay: .3s; }
+@keyframes signal { 0%, 100% { transform: scaleY(.35); } 40% { transform: scaleY(1); } }
+
+/* ---------- операторы ---------- */
+.admin-only { display: none; }
+.is-admin .admin-only { display: grid; }
+.view-team { overflow-y: auto; padding: 32px 40px 48px; }
+.team-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr); gap: 20px; align-items: start; max-width: 1280px; }
+.team-row { display: grid; grid-template-columns: 38px 1fr auto; gap: 12px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--line); }
+.team-row.off { opacity: .55; }
+.team-name { font-weight: 600; }
+.team-meta { font-size: 12.5px; color: var(--muted); }
+.role.admin { color: var(--text); font-weight: 600; }
+.team-actions { display: flex; gap: 6px; }
+.form { display: grid; gap: 14px; padding: 6px 18px 18px; }
+.form > label { display: grid; gap: 6px; font-size: 12.5px; font-weight: 500; color: var(--muted); }
+.form input[type=text], .form input:not([type]) { height: 38px; border-radius: 9px; border: 1px solid var(--line-strong); background: var(--surface); padding: 0 12px; font-size: 14px; color: var(--text); }
+.form input:focus { outline: none; border-color: var(--strong); box-shadow: 0 0 0 3px color-mix(in srgb, var(--yellow) 45%, transparent); }
+.chip-radio { display: grid; }
+.chip-radio input { position: absolute; opacity: 0; pointer-events: none; }
+.chip-radio span { height: 28px; border-radius: 7px; display: grid; place-items: center; color: var(--text); font-size: 12.5px; font-weight: 500; cursor: pointer; }
+.chip-radio input:checked + span { background: var(--surface); box-shadow: 0 0 0 .5px rgba(0, 0, 0, .06), 0 2px 6px rgba(0, 0, 0, .08); font-weight: 600; }
+.chip-radio input:focus-visible + span { outline: 3px solid color-mix(in srgb, var(--yellow) 70%, transparent); }
+.pop-head .btn { justify-self: end; }
+@media (max-width: 1000px) { .team-grid { grid-template-columns: 1fr; } .view-team { padding: 24px; } }
+@media (max-width: 760px) { .view-team { padding: 20px 16px 32px; } .team-row { grid-template-columns: 38px 1fr; } .team-actions { grid-column: 1 / -1; } }

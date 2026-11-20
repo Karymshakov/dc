@@ -337,7 +337,7 @@ class Hub:
             "proposals": self.store.proposals(),
         }
 
-    # --- демо-клиент -------------------------------------------------------
+    # --- абонент без Telegram (для тестов) ---------------------------------
 
     def new_demo_chat(self) -> dict[str, Any]:
         chat_id = f"demo-{secrets.token_hex(3)}"
@@ -347,7 +347,7 @@ class Hub:
         return self._require(chat_id)
 
     def demo_message(self, chat_id: str, text: str) -> None:
-        """Реплика демо-абонента: проходит ровно тот путь, что из Telegram."""
+        """Реплика тестового абонента: ровно тот путь, что из Telegram."""
         from faq_bot import bot
 
         conversation = self._require(chat_id)

@@ -84,6 +84,17 @@ CREATE TABLE IF NOT EXISTS learned (
     created_at  REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS operators (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    login          TEXT NOT NULL UNIQUE,
+    name           TEXT NOT NULL,
+    role           TEXT NOT NULL DEFAULT 'operator',
+    password_hash  TEXT NOT NULL,
+    active         INTEGER NOT NULL DEFAULT 1,
+    last_login     REAL,
+    created_at     REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS proposals (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id     TEXT,
@@ -341,6 +352,32 @@ class Store:
     def review_proposal(self, proposal_id: int, status: str, reviewer: str) -> None:
         self._run("UPDATE proposals SET status = ?, reviewer = ? WHERE id = ?",
                   (status, reviewer, int(proposal_id)))
+
+    # --- учётные записи ----------------------------------------------------
+
+    def add_operator(self, login: str, name: str, role: str,
+                     password_hash: str) -> int:
+        return self._run(
+            "INSERT INTO operators (login, name, role, password_hash, created_at)"
+            " VALUES (?,?,?,?,?)", (login, name, role, password_hash, self.clock()))
+
+    def operator(self, operator_id: int) -> dict[str, Any] | None:
+        return self._one("SELECT * FROM operators WHERE id = ?", (int(operator_id),))
+
+    def operator_by_login(self, login: str) -> dict[str, Any] | None:
+        return self._one("SELECT * FROM operators WHERE login = ?", (login,))
+
+    def operators(self) -> list[dict[str, Any]]:
+        return self._all("SELECT * FROM operators ORDER BY role, login")
+
+    def update_operator(self, operator_id: int, **fields: Any) -> None:
+        allowed = {"name", "role", "active", "password_hash", "last_login"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"неизвестные поля: {sorted(unknown)}")
+        columns = ", ".join(f"{name} = ?" for name in fields)
+        self._run(f"UPDATE operators SET {columns} WHERE id = ?",
+                  (*fields.values(), int(operator_id)))
 
     # --- аналитика и уборка ------------------------------------------------
 

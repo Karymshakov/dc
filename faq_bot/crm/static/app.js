@@ -20,7 +20,6 @@ const S = {
   version: 0,
   offset: 0,                // серверное время минус локальное, секунды
   collapsed: new Set(),
-  demoChat: null,
   hasOlder: new Map(),
 };
 
@@ -43,6 +42,20 @@ function h(tag, attrs, ...children) {
     el.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
   return el;
+}
+
+function ill(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "ill");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  use.setAttribute("href", "#" + name);
+  svg.append(use);
+  return svg;
+}
+
+function emptyBlock(art, title, text) {
+  return h("div", { class: "empty" }, art ? ill(art) : null, h("b", { text: title }), text);
 }
 
 function icon(name, cls) {
@@ -201,12 +214,11 @@ $("#theme-toggle").addEventListener("click", () => {
 
 function showLogin() {
   $("#app").hidden = true;
-  $("#demo").hidden = true;
   $("#login").hidden = false;
-  const name = store.get("name", "");
+  const login = store.get("login", "");
   const form = $("#login-form");
-  if (name) form.elements.name.value = name;
-  (name ? form.elements.password : form.elements.name).focus();
+  if (login) form.elements.login.value = login;
+  (login ? form.elements.password : form.elements.login).focus();
 }
 
 $("#login-form").addEventListener("submit", async (event) => {
@@ -217,9 +229,9 @@ $("#login-form").addEventListener("submit", async (event) => {
   button.disabled = true;
   try {
     const me = await api("POST", "/api/login", {
-      name: form.elements.name.value, password: form.elements.password.value,
+      login: form.elements.login.value, password: form.elements.password.value,
     });
-    store.set("name", me.name);
+    store.set("login", me.login);
     form.elements.password.value = "";
     await start();
   } catch (error) {
@@ -240,14 +252,16 @@ let polling = false;
 
 async function start() {
   const data = await api("GET", "/api/bootstrap");
-  S.me = data.me;
+  S.user = data.me;
+  S.me = data.me.name;
+  document.body.classList.toggle("is-admin", data.me.role === "admin");
   S.version = data.version;
   S.offset = data.now - Date.now() / 1000;
   S.faq = new Map(data.faq.map((entry) => [entry.id, entry]));
   setConversations(data.conversations);
   $("#login").hidden = true;
   $("#app").hidden = false;
-  $("#me-name").textContent = S.me;
+  $("#me-name").textContent = S.me + (S.user.role === "admin" ? " · админ" : "");
   S.collapsed = new Set(store.get("collapsed", []));
   setView(store.get("view", "chats"));
   renderList();
@@ -281,7 +295,6 @@ function onChanged(changed) {
   const chats = new Set(changed.filter((key) => key.startsWith("chat:")).map((key) => key.slice(5)));
   if (everything || chats.size) soon("list", refreshList);
   if (S.open && (everything || chats.has(S.open))) soon("open", () => loadMessages(S.open, true));
-  if (S.demoChat && (everything || chats.has(S.demoChat))) soon("demo", renderDemo, 60);
   if (S.view === "learning" && (everything || changed.some((key) => key.startsWith("learning")) || chats.size)) soon("learning", loadLearning, 250);
   if (S.view === "analytics") soon("analytics", loadAnalytics, 600);
 }
@@ -319,13 +332,15 @@ function updateBadges() {
 /* ---------------- разделы ---------------- */
 
 function setView(view) {
-  if (!["chats", "learning", "analytics"].includes(view)) view = "chats";
+  if (!["chats", "learning", "analytics", "team"].includes(view)) view = "chats";
+  if (view === "team" && S.user.role !== "admin") view = "chats";
   S.view = view;
   store.set("view", view);
   for (const pane of document.querySelectorAll(".view")) pane.hidden = pane.dataset.pane !== view;
   for (const button of document.querySelectorAll(".rail-btn[data-view]")) button.classList.toggle("active", button.dataset.view === view);
   if (view === "learning") loadLearning();
   if (view === "analytics") loadAnalytics();
+  if (view === "team") loadTeam();
 }
 
 for (const button of document.querySelectorAll(".rail-btn[data-view]")) {
@@ -498,8 +513,6 @@ function renderChatHead() {
     note.replaceChildren(icon("bot"), "Диалог ведёт бот. Ваш ответ перехватит диалог — бот в этом чате замолчит.");
   } else if (conv.status === "operator" && !mine) {
     note.replaceChildren(icon("info"), `Диалог ведёт ${conv.operator}. Ответ заберёт его себе.`);
-  } else if (conv.source === "demo") {
-    note.replaceChildren(icon("phone"), "Демо-абонент: ответ появится в окне «Демо-клиент».");
   } else {
     note.replaceChildren();
   }
@@ -838,7 +851,7 @@ async function loadLearning() {
       h("div", { class: "q-meta" }, h("span", { class: "lang " + (item.chat_lang || "ru"), text: LANG[item.chat_lang] || "RU" }), displayName(conv), "·", shortTime(item.created_at),
         item.confidence != null ? h("span", { text: "· уверенность бота " + percent(item.confidence) }) : null),
       actions);
-  }) : [h("div", { class: "empty" }, h("b", { text: "Очередь пуста" }), "Все реплики, которые бот не понял, уже размечены.")]));
+  }) : [emptyBlock("ill-done", "Очередь пуста", "Все реплики, которые бот не понял, уже размечены.")]));
 
   $("#learned-count").textContent = data.learned.length;
   $("#learned").replaceChildren(...(data.learned.length ? data.learned.map((row) => {
@@ -846,11 +859,11 @@ async function loadLearning() {
     try { report = JSON.parse(row.report || "{}"); } catch { /* старый формат */ }
     return h("div", { class: "l-item" },
       h("div", { class: "l-row" }, h("span", { class: "l-phrase", text: "«" + row.phrase + "»" }),
-        h("button", { class: "btn ghost sm", onclick: () => disableLearned(row.id) }, "Отменить")),
+        S.user.role === "admin" ? h("button", { class: "btn ghost sm", onclick: () => disableLearned(row.id) }, "Отменить") : null),
       h("div", { class: "l-meta" }, h("span", { class: "tagchip topic", text: "Тема " + row.faq_id }), " ", shorten(topicName(row.faq_id), 40),
         ` · ${row.operator} · ${shortTime(row.created_at)}`,
         report.after && report.after.total ? ` · top-1 ${percent(report.after.top1_share)}` : ""));
-  }) : [h("div", { class: "empty" }, h("b", { text: "Пока ничего" }), "Отметьте тему у непонятой реплики — бот запомнит формулировку.")]));
+  }) : [emptyBlock("ill-learn", "Пока ничего", "Отметьте тему у непонятой реплики — бот запомнит формулировку.")]));
 
   $("#proposals-count").textContent = data.proposals.filter((p) => p.status === "pending").length;
   $("#proposals").replaceChildren(...(data.proposals.length ? data.proposals.map((row) => h("div", { class: "p-item" },
@@ -858,10 +871,10 @@ async function loadLearning() {
       h("span", { class: "status-tag " + row.status, text: { pending: "на проверке", approved: "одобрено", rejected: "отклонено" }[row.status] })),
     h("div", { class: "p-a", text: row.answer }),
     h("div", { class: "l-row" }, h("span", { class: "l-meta", text: `${row.operator} · ${LANG[row.lang] || row.lang}` + (row.faq_id ? ` · тема ${row.faq_id}` : "") + (row.reviewer ? ` · проверил(а) ${row.reviewer}` : "") }),
-      row.status === "pending" ? h("span", { class: "q-actions" },
+      row.status === "pending" && S.user.role === "admin" ? h("span", { class: "q-actions" },
         h("button", { class: "btn ok sm", onclick: () => review(row.id, "approved") }, "Одобрить"),
         h("button", { class: "btn danger sm", onclick: () => review(row.id, "rejected") }, "Отклонить")) : null),
-  )) : [h("div", { class: "empty" }, h("b", { text: "Предложений нет" }), "Поставьте галочку под ответом оператора — он придёт сюда на проверку.")]));
+  )) : [emptyBlock("ill-propose", "Предложений нет", "Поставьте галочку под ответом оператора — он придёт сюда на проверку.")]));
 }
 
 function shorten(text, n) { text = String(text || ""); return text.length > n ? text.slice(0, n - 1) + "…" : text; }
@@ -903,7 +916,7 @@ async function loadAnalytics() {
   }));
 
   const bars = (rows, label, cls = "") => {
-    if (!rows.length) return [h("div", { class: "empty", text: "Пока нет данных" })];
+    if (!rows.length) return [emptyBlock("ill-chart", "Пока нет данных", "")];
     const top = Math.max(...rows.map((r) => r.n));
     return rows.slice(0, 8).map((row) => {
       const fill = h("div", { class: "bar-fill " + cls });
@@ -932,82 +945,90 @@ async function loadAnalytics() {
   }) : [h("div", { class: "empty", text: "Операторы ещё не отвечали" })]));
 }
 
-/* ---------------- демо-клиент ---------------- */
+/* ---------------- операторы (администратор) ---------------- */
 
-const DEMO_HINTS = ["Скока денег на счету?", "Balansymdy kantip korom", "Интернетим иштебей жатат", "Как подключить роуминг?", "А сколько стоит?", "Курс доллара", "Оператор"];
+const ROLE_NAMES = { admin: "Администратор", operator: "Оператор" };
 
-async function openDemo(fresh) {
-  try {
-    const current = S.open && S.convs.get(S.open);
-    if (!fresh && current && current.source === "demo") S.demoChat = current.chat_id;
-    else if (fresh || !S.demoChat || !S.convs.has(S.demoChat)) {
-      const data = await api("POST", "/api/demo/new", {});
-      S.convs.set(data.conversation.chat_id, data.conversation);
-      S.demoChat = data.conversation.chat_id;
-      renderList();
-    }
-    $("#demo").hidden = false;
-    $("#demo-name").textContent = displayName(S.convs.get(S.demoChat));
-    $("#demo-hints").replaceChildren(...DEMO_HINTS.map((text) => h("button", { onclick: () => demoSend(text) }, text)));
-    if (S.open !== S.demoChat) openChat(S.demoChat);
-    await renderDemo();
-    $("#demo-text").focus();
-  } catch (error) { fail(error); }
+async function loadTeam() {
+  let data;
+  try { data = await api("GET", "/api/operators"); } catch (error) { if (error.status !== 401) fail(error); return; }
+  $("#team-count").textContent = data.operators.length;
+  $("#team-list").replaceChildren(...data.operators.map((row) => {
+    const self = row.id === S.user.id;
+    const av = h("span", { class: "avatar", text: initials(row.name) });
+    const actions = h("div", { class: "team-actions" },
+      h("button", { class: "btn ghost sm", title: "Задать новый пароль", onclick: (event) => resetPassword(event.currentTarget, row) }, icon("key"), "Пароль"),
+      self ? null : h("button", { class: "btn sm " + (row.active ? "danger" : "ok"), onclick: () => updateOperator(row.id, { active: !row.active }, row.active ? "Оператор отключён, его сессии закрыты." : "Оператор снова может входить.") }, row.active ? "Отключить" : "Включить"));
+    return h("div", { class: "team-row" + (row.active ? "" : " off") }, av,
+      h("div", { class: "team-main" },
+        h("div", { class: "team-name" }, row.name, self ? h("span", { class: "muted", text: " · вы" }) : null),
+        h("div", { class: "team-meta" }, row.login, " · ", h("span", { class: "role " + row.role, text: ROLE_NAMES[row.role] || row.role }),
+          row.active ? null : h("span", { class: "tagchip miss", text: " · отключён" }),
+          row.last_login ? " · вход " + shortTime(row.last_login) : " · ещё не входил(а)")),
+      actions);
+  }));
 }
 
-$("#demo-open").addEventListener("click", () => ($("#demo").hidden ? openDemo(false) : ($("#demo").hidden = true)));
-$("#empty-demo").addEventListener("click", () => openDemo(true));
-$("#demo-new").addEventListener("click", () => openDemo(true));
-$("#demo-close").addEventListener("click", () => { $("#demo").hidden = true; });
-$("#demo-form").addEventListener("submit", (event) => {
+async function updateOperator(id, fields, message) {
+  try { await api("POST", `/api/operators/${id}`, fields); toast(message); loadTeam(); }
+  catch (error) { fail(error); }
+}
+
+function resetPassword(anchor, row) {
+  if (popoverOwner === anchor) { closePopover(); return; }
+  const input = h("input", { type: "text", minlength: "6", placeholder: "Новый пароль", autocomplete: "new-password" });
+  const form = h("form", { class: "pop-head", onsubmit: (event) => {
+    event.preventDefault();
+    if (input.value.length < 6) { toast("Пароль не короче 6 символов", "bad"); return; }
+    closePopover();
+    updateOperator(row.id, { password: input.value }, `Пароль для ${row.login} изменён. Старые сессии закрыты.`);
+  } }, h("b", { text: "Новый пароль для " + row.login }), h("label", { class: "search" }, icon("key"), input),
+    h("button", { class: "btn primary sm", type: "submit" }, "Сохранить"));
+  popover.replaceChildren(form);
+  popoverOwner = anchor;
+  placePopover(anchor);
+  input.focus();
+}
+
+$("#team-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const input = $("#demo-text");
-  const text = input.value.trim();
-  if (text) { input.value = ""; demoSend(text); }
+  const form = event.currentTarget;
+  const fields = Object.fromEntries(new FormData(form).entries());
+  fields.login = String(fields.login || "").trim().toLowerCase();
+  try {
+    const data = await api("POST", "/api/operators", fields);
+    toast(`Оператор ${data.operator.name} создан`, "ok", `Логин: ${data.operator.login}. Пароль передайте лично.`);
+    form.reset();
+    loadTeam();
+  } catch (error) { fail(error); }
 });
 
-async function demoSend(text) {
-  if (!S.demoChat) return;
-  try { await api("POST", `/api/demo/${encodeURIComponent(S.demoChat)}/message`, { text }); }
-  catch (error) { fail(error); }
-}
-
-async function demoAction(action) {
-  try { await api("POST", `/api/demo/${encodeURIComponent(S.demoChat)}/action`, { action }); }
-  catch (error) { fail(error); }
-}
-
-async function renderDemo() {
-  if ($("#demo").hidden || !S.demoChat) return;
-  const chatId = S.demoChat;
-  let data;
-  try { data = await api("GET", `/api/conversations/${encodeURIComponent(chatId)}/messages?limit=60`); }
-  catch { return; }
-  if (chatId !== S.demoChat) return;
-  const screen = $("#demo-screen");
-  const nodes = [];
-  const last = data.messages.length - 1;
-  data.messages.forEach((m, index) => {
-    if (m.dir === "sys") {
-      if (m.tag && (m.tag.startsWith("handoff") || m.tag === "take" || m.tag === "release")) nodes.push(h("div", { class: "d-sys", text: m.text }));
-      return;
-    }
-    if (m.dir === "in") { nodes.push(h("div", { class: "d-msg me", text: m.text })); return; }
-    nodes.push(h("div", { class: "d-msg them" + (m.dir === "op" ? " op" : "") }, h("small", { text: m.dir === "op" ? (m.author || "Оператор") : "INAI Mobile" }), m.dir === "bot" ? plain(m.text) : m.text));
-    if (m.dir === "bot" && m.buttons && m.buttons.length && index === last) {
-      nodes.push(h("div", { class: "d-btns" }, m.buttons.map(([label, action]) => h("button", { onclick: () => demoAction(action) }, plain(label)))));
-    }
-  });
-  if (!nodes.length) nodes.push(h("div", { class: "d-sys", text: "Напишите боту — как абонент в Telegram." }));
-  screen.replaceChildren(...nodes);
-  screen.scrollTop = screen.scrollHeight;
-}
-
 /* ---------------- старт ---------------- */
+
+/* Прелоадер: гифка static/bee.gif, а пока она грузится или если её нет — логотип
+ * с бегущими полосками связи. Держится не меньше 600 мс, чтобы не мигать. */
+const bootStarted = performance.now();
+const preImg = $("#preloader-img");
+function preImgReady() { preImg.hidden = false; }   // логотип прячет CSS
+if (preImg.complete && preImg.naturalWidth) preImgReady();
+else preImg.addEventListener("load", preImgReady, { once: true });
+
+function hidePreloader() {
+  const wait = Math.max(0, 600 - (performance.now() - bootStarted));
+  setTimeout(() => {
+    const el = $("#preloader");
+    if (!el || el.classList.contains("done")) return;
+    el.classList.add("done");
+    setTimeout(() => el.remove(), 400);
+  }, wait);
+}
 
 applyTheme(store.get("theme", null));
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => applyTheme(store.get("theme", null)));
 if (store.get("info", false)) { $("#info-pane").hidden = false; $("#btn-info").classList.add("active"); }
 autosize();
 
-api("GET", "/api/me").then((me) => (me && me.name ? start() : showLogin())).catch(showLogin);
+api("GET", "/api/me")
+  .then((me) => (me && me.name ? start() : showLogin()))
+  .catch(showLogin)
+  .finally(hidePreloader);

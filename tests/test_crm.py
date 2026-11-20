@@ -238,22 +238,15 @@ def test_аналитика(hub, clock):
 
 # --- HTTP -----------------------------------------------------------------
 
-@pytest.fixture
-def http(hub):
-    server = build_server("127.0.0.1", 0, hub=hub, password="secret")
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base = f"http://127.0.0.1:{server.server_address[1]}"
-    jar = CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+def client(base):
+    """Отдельный браузер: свой набор cookie, своя сессия."""
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
 
     def call(method, path, body=None, headers=None):
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(base + path, data=data, method=method)
         request.add_header("Content-Type", "application/json")
-        if headers is None:
-            headers = {"X-CRM": "1"}
-        for key, value in headers.items():
+        for key, value in ({"X-CRM": "1"} if headers is None else headers).items():
             request.add_header(key, value)
         try:
             with opener.open(request, timeout=10) as response:
@@ -261,51 +254,120 @@ def http(hub):
         except urllib.error.HTTPError as error:
             return error.code, json.loads(error.read() or b"null")
 
-    yield call
+    return call
+
+
+@pytest.fixture
+def base(hub):
+    server = build_server("127.0.0.1", 0, hub=hub)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
     server.server_close()
 
 
-def test_api_без_входа_закрыт(http):
-    status, _ = http("GET", "/api/conversations")
+@pytest.fixture
+def admin(base):
+    call = client(base)
+    status, me = call("POST", "/api/login", {"login": "admin", "password": "admin123!"})
+    assert status == 200 and me["role"] == "admin"
+    return call
+
+
+def make_operator(admin, base, login="aigul", password="secret1"):
+    status, body = admin("POST", "/api/operators", {
+        "login": login, "name": "Айгуль", "password": password, "role": "operator"})
+    assert status == 200, body
+    call = client(base)
+    status, me = call("POST", "/api/login", {"login": login, "password": password})
+    assert status == 200 and me["role"] == "operator"
+    return call, body["operator"]
+
+
+def test_api_без_входа_закрыт(base):
+    status, _ = client(base)("GET", "/api/conversations")
     assert status == 401
 
 
-def test_api_неверный_пароль(http):
-    status, body = http("POST", "/api/login", {"name": "Айгуль", "password": "x"})
+def test_api_неверный_пароль(base):
+    status, _ = client(base)("POST", "/api/login", {"login": "admin", "password": "x"})
     assert status == 403
 
 
-def test_api_post_без_заголовка_отклонён(http):
-    http("POST", "/api/login", {"name": "Айгуль", "password": "secret"})
-    status, _ = http("POST", "/api/demo/new", {}, headers={})
+def test_api_post_без_заголовка_отклонён(admin):
+    status, _ = admin("POST", "/api/logout", {}, headers={})
     assert status == 403
 
 
-def test_api_полный_сценарий(http):
-    status, me = http("POST", "/api/login", {"name": "Айгуль", "password": "secret"})
-    assert status == 200 and me["name"] == "Айгуль"
+def test_пароль_хранится_хэшем(admin, hub):
+    row = hub.store.operator_by_login("admin")
+    assert "admin123!" not in row["password_hash"]
+    assert row["password_hash"].startswith("pbkdf2_sha256$")
 
-    status, boot = http("GET", "/api/bootstrap")
-    assert status == 200 and len(boot["faq"]) == 15
 
-    _, created = http("POST", "/api/demo/new", {})
-    chat = created["conversation"]["chat_id"]
-    assert http("POST", f"/api/demo/{chat}/message", {"text": "оператор"})[0] == 200
+def test_оператор_не_управляет_учётными_записями(admin, base):
+    operator, _ = make_operator(admin, base)
+    assert operator("GET", "/api/operators")[0] == 403
+    assert operator("POST", "/api/operators", {
+        "login": "evil", "name": "x", "password": "123456"})[0] == 403
+    assert operator("GET", "/api/proposals/export")[0] == 403
+    assert operator("GET", "/api/conversations")[0] == 200
 
-    _, listing = http("GET", "/api/conversations")
+
+def test_отключённый_оператор_теряет_доступ(admin, base):
+    operator, row = make_operator(admin, base)
+    assert admin("POST", f"/api/operators/{row['id']}", {"active": False})[0] == 200
+    assert operator("GET", "/api/conversations")[0] == 401
+    status, _ = client(base)("POST", "/api/login", {"login": "aigul", "password": "secret1"})
+    assert status == 403
+
+
+def test_смена_пароля_закрывает_старые_сессии(admin, base):
+    operator, row = make_operator(admin, base)
+    assert admin("POST", f"/api/operators/{row['id']}", {"password": "newpass1"})[0] == 200
+    assert operator("GET", "/api/conversations")[0] == 401
+    status, _ = client(base)("POST", "/api/login", {"login": "aigul", "password": "newpass1"})
+    assert status == 200
+
+
+def test_администратор_не_отключает_себя(admin, hub):
+    me = hub.store.operator_by_login("admin")
+    status, body = admin("POST", f"/api/operators/{me['id']}", {"active": False})
+    assert status == 400
+
+
+def test_логин_уникален_и_проверяется(admin, base):
+    make_operator(admin, base)
+    assert admin("POST", "/api/operators", {
+        "login": "aigul", "name": "x", "password": "123456"})[0] == 400
+    assert admin("POST", "/api/operators", {
+        "login": "Плохой логин", "name": "x", "password": "123456"})[0] == 400
+    assert admin("POST", "/api/operators", {
+        "login": "short", "name": "x", "password": "123"})[0] == 400
+
+
+def test_api_полный_сценарий(admin, base, hub):
+    operator, _ = make_operator(admin, base)
+    status, boot = operator("GET", "/api/bootstrap")
+    assert status == 200 and len(boot["faq"]) == 15 and boot["me"]["role"] == "operator"
+
+    chat = demo(hub)
+    hub.demo_message(chat, "оператор")
+
+    _, listing = operator("GET", "/api/conversations")
     found = next(c for c in listing["conversations"] if c["chat_id"] == chat)
     assert found["status"] == "waiting"
 
-    status, sent = http("POST", f"/api/conversations/{chat}/send", {"text": "Слушаю вас"})
+    status, sent = operator("POST", f"/api/conversations/{chat}/send", {"text": "Слушаю вас"})
     assert status == 200 and sent["delivered"]
 
-    _, messages = http("GET", f"/api/conversations/{chat}/messages")
+    _, messages = operator("GET", f"/api/conversations/{chat}/messages")
     assert messages["messages"][-1]["text"] == "Слушаю вас"
     assert messages["conversation"]["operator"] == "Айгуль"
 
-    assert http("POST", f"/api/conversations/{chat}/release", {})[0] == 200
-    status, data = http("GET", "/api/analytics")
+    assert operator("POST", f"/api/conversations/{chat}/release", {})[0] == 200
+    status, data = operator("GET", "/api/analytics")
     assert status == 200 and data["conversations"] >= 1
 
 
@@ -318,7 +380,7 @@ def test_проверка_точности_идёт_по_текстам_откр
 
 
 def test_api_статика_сжата_и_с_политикой_безопасности(hub):
-    server = build_server("127.0.0.1", 0, hub=hub, password="secret")
+    server = build_server("127.0.0.1", 0, hub=hub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

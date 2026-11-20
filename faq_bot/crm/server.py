@@ -16,9 +16,11 @@ Python». Операторов единицы, сообщений — десят
 
 Безопасность:
 
-* пароль из `CRM_PASSWORD`; если не задан — генерируется и печатается
-  при запуске, пустого пароля не бывает;
-* сессия — случайный токен в cookie `HttpOnly; SameSite=Strict`;
+* у каждого оператора свой логин и пароль, пароли хранятся как
+  PBKDF2-SHA256 с солью (`faq_bot.crm.accounts`); операторов заводит
+  администратор, служебные действия доступны только ему;
+* сессия — случайный токен в cookie `HttpOnly; SameSite=Strict`; при
+  смене пароля или отключении оператора его сессии гасятся сразу;
 * любой POST требует заголовок `X-CRM: 1`: чужая страница не может его
   поставить без CORS, это закрывает CSRF;
 * ограничение попыток входа, CSP без внешних источников, по умолчанию
@@ -28,7 +30,6 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from faq_bot import config
+from faq_bot.crm import accounts as acc
 from faq_bot.crm.hub import Hub
 from faq_bot.crm.store import Store
 
@@ -55,6 +57,9 @@ STATIC_TYPES = {
     ".css": "text/css; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
+    ".gif": "image/gif",
+    ".png": "image/png",
+    ".webp": "image/webp",
 }
 POLL_TIMEOUT = 25.0
 SESSION_TTL = 12 * 3600
@@ -81,17 +86,24 @@ def load_env() -> None:
 
 class Sessions:
     def __init__(self) -> None:
-        self._items: dict[str, tuple[str, float]] = {}
+        self._items: dict[str, tuple[int, float]] = {}
         self._failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
 
-    def create(self, name: str) -> str:
+    def create(self, operator_id: int) -> str:
         token = secrets.token_urlsafe(32)
         with self._lock:
-            self._items[token] = (name, time.time() + SESSION_TTL)
+            self._items[token] = (int(operator_id), time.time() + SESSION_TTL)
         return token
 
-    def name(self, token: str | None) -> str | None:
+    def drop_operator(self, operator_id: int) -> None:
+        """Погасить все сессии оператора: сменили пароль или отключили."""
+        with self._lock:
+            for token in [key for key, (owner, _) in self._items.items()
+                          if owner == int(operator_id)]:
+                self._items.pop(token, None)
+
+    def operator_id(self, token: str | None) -> int | None:
         if not token:
             return None
         with self._lock:
@@ -147,11 +159,19 @@ class CrmServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], hub: Hub, password: str) -> None:
+    def __init__(self, address: tuple[str, int], hub: Hub) -> None:
         super().__init__(address, Handler)
         self.hub = hub
-        self.password = password
+        self.accounts = acc.Accounts(hub.store)
         self.sessions = Sessions()
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Закрытая вкладка обрывает длинный опрос — это не ошибка."""
+        import sys
+
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
 
 ROUTES: list[tuple[str, re.Pattern[str], str]] = [
@@ -173,13 +193,17 @@ ROUTES: list[tuple[str, re.Pattern[str], str]] = [
         ("POST", r"/api/proposals/(?P<id>\d+)/review", "review"),
         ("GET", r"/api/proposals/export", "export"),
         ("GET", r"/api/analytics", "analytics"),
-        ("POST", r"/api/demo/new", "demo_new"),
-        ("POST", r"/api/demo/(?P<chat>[\w\-]+)/message", "demo_message"),
-        ("POST", r"/api/demo/(?P<chat>[\w\-]+)/action", "demo_action"),
+        ("GET", r"/api/operators", "operators"),
+        ("POST", r"/api/operators", "operator_create"),
+        ("POST", r"/api/operators/(?P<id>\d+)", "operator_update"),
     )
 ]
 
 PUBLIC = {"me", "login"}
+
+#: Только администратор: учётные записи и то, что меняет бота для всех.
+ADMIN_ONLY = {"operators", "operator_create", "operator_update",
+              "review", "disable", "export"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -244,9 +268,12 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, "нет такого адреса")
             return
         try:
-            operator = self._operator()
+            self.user = self._user()
+            operator = self.user["name"] if self.user else None
             if name not in PUBLIC and operator is None:
                 raise ApiError(401, "нужен вход")
+            if name in ADMIN_ONLY and self.user["role"] != acc.ADMIN:
+                raise ApiError(403, "доступно только администратору")
             if method == "POST" and self.headers.get("X-CRM") != "1":
                 raise ApiError(403, "запрос без заголовка X-CRM")
             body = self._body() if method == "POST" else {}
@@ -259,7 +286,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, "не найдено")
         except (ValueError, PermissionError) as error:
             self._error(400, str(error))
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:            # вкладку закрыли посреди ответа
             pass
         except Exception:
             logger.exception("CRM: ошибка в %s %s", method, url.path)
@@ -284,8 +311,15 @@ class Handler(BaseHTTPRequestHandler):
         morsel = cookie.get(COOKIE)
         return morsel.value if morsel else None
 
-    def _operator(self) -> str | None:
-        return self.server.sessions.name(self._token())
+    def _user(self) -> dict[str, Any] | None:
+        """Учётная запись по сессии; отключённый оператор не проходит."""
+        operator_id = self.server.sessions.operator_id(self._token())
+        if operator_id is None:
+            return None
+        row = acc.public(self.server.hub.store.operator(operator_id))
+        if row is None or not row["active"]:
+            return None
+        return row
 
     def _serve_static(self, path: str) -> None:
         name = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
@@ -314,24 +348,32 @@ class Handler(BaseHTTPRequestHandler):
     def hub(self) -> Hub:
         return self.server.hub
 
+    def _me(self) -> dict[str, Any] | None:
+        if not self.user:
+            return None
+        return {key: self.user[key] for key in ("id", "login", "name", "role")}
+
     def api_me(self, operator, **_):
-        self._json({"name": operator})
+        self._json(self._me() or {"name": None})
 
     def api_login(self, operator, body, **_):
         address = self.client_address[0]
         if self.server.sessions.throttled(address):
             raise ApiError(429, "слишком много попыток, подождите минуту")
-        name = re.sub(r"\s+", " ", str(body.get("name") or "")).strip()[:40]
-        password = str(body.get("password") or "")
-        if not name:
-            raise ApiError(400, "укажите имя оператора")
-        if not hmac.compare_digest(password.encode(), self.server.password.encode()):
+        login = str(body.get("login") or "")[:64]
+        password = str(body.get("password") or "")[:256]
+        if not login or not password:
+            raise ApiError(400, "введите логин и пароль")
+        user = self.server.accounts.authenticate(login, password)
+        if user is None:
             self.server.sessions.failed(address)
-            raise ApiError(403, "неверный пароль")
-        token = self.server.sessions.create(name)
+            raise ApiError(403, "неверный логин или пароль")
+        self.server.hub.store.update_operator(user["id"], last_login=time.time())
+        token = self.server.sessions.create(user["id"])
         cookie = (f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict;"
                   f" Max-Age={SESSION_TTL}")
-        self._json({"name": name}, extra={"Set-Cookie": cookie})
+        self.user = user
+        self._json(self._me(), extra={"Set-Cookie": cookie})
 
     def api_logout(self, operator, **_):
         self.server.sessions.drop(self._token())
@@ -345,7 +387,7 @@ class Handler(BaseHTTPRequestHandler):
                 "question_ky": entry.question_ky, "answer_ru": entry.answer_ru,
                 "answer_ky": entry.answer_ky} for entry in knowledge.default_faq()]
         self._json({
-            "me": operator,
+            "me": self._me(),
             "version": self.hub.store.feed.version,
             "faq": faq,
             "threshold": config.CONFIDENCE_THRESHOLD,
@@ -423,37 +465,44 @@ class Handler(BaseHTTPRequestHandler):
     def api_analytics(self, operator, **_):
         self._json(self.hub.analytics())
 
-    def api_demo_new(self, operator, **_):
-        self._json({"conversation": self.hub.new_demo_chat()})
+    def api_operators(self, operator, **_):
+        self._json({"operators": self.server.accounts.list()})
 
-    def api_demo_message(self, operator, chat, body, **_):
-        self.hub.demo_message(chat, str(body.get("text") or ""))
-        self._json({"ok": True})
+    def api_operator_create(self, operator, body, **_):
+        created = self.server.accounts.create(
+            str(body.get("login") or ""), str(body.get("name") or ""),
+            str(body.get("password") or ""), str(body.get("role") or acc.OPERATOR))
+        self._json({"operator": created})
 
-    def api_demo_action(self, operator, chat, body, **_):
-        self.hub.demo_action(chat, str(body.get("action") or ""))
-        self._json({"ok": True})
+    def api_operator_update(self, operator, id, body, **_):  # noqa: A002
+        password = body.get("password")
+        active = body.get("active")
+        updated = self.server.accounts.update(
+            int(id), self.user["id"],
+            name=body.get("name"), role=body.get("role"),
+            active=None if active is None else bool(active),
+            password=None if password in (None, "") else str(password))
+        if password or active is False:
+            self.server.sessions.drop_operator(int(id))
+        self._json({"operator": updated})
 
 
 def build_server(host: str | None = None, port: int | None = None,
-                 hub: Hub | None = None, password: str | None = None) -> CrmServer:
+                 hub: Hub | None = None) -> CrmServer:
     load_env()
     host = host or os.environ.get("CRM_HOST", "127.0.0.1")
     # port=0 — законный «любой свободный порт», поэтому проверка на None.
     port = int(port if port is not None else (os.environ.get("CRM_PORT") or 8765))
-    password = password or os.environ.get("CRM_PASSWORD", "").strip()
-    generated = not password
-    if generated:
-        password = secrets.token_urlsafe(9)
     if hub is None:
         retention = float(os.environ.get("CRM_RETENTION_DAYS") or 30)
         db_path = os.environ.get("CRM_DB") or None
         hub = Hub(Store(db_path), retention_days=retention)
-    server = CrmServer((host, port), hub, password)
+    server = CrmServer((host, port), hub)
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
     print(f"CRM операторов: http://{shown}:{port}")
-    if generated:
-        print(f"  пароль (CRM_PASSWORD не задан, создан на этот запуск): {password}")
+    if server.accounts.ensure_admin():
+        print(f"  создан администратор: логин {acc.DEFAULT_ADMIN_LOGIN}."
+              " Смените пароль после первого входа (раздел «Операторы»).")
     return server
 
 
@@ -467,12 +516,12 @@ def start_in_background(**kwargs: Any) -> CrmServer:
 
 
 def serve(host: str | None = None, port: int | None = None) -> int:
-    """Только CRM, без Telegram: демо-клиент и разметка работают полностью."""
+    """Только CRM, без Telegram: история, обучение и аналитика из базы."""
     from faq_bot import bot
 
     server = build_server(host, port)
     bot.attach_crm(server.hub)
-    print("Режим без Telegram: абонента изображает кнопка «Демо-клиент».")
+    print("Режим без Telegram: новые обращения не приходят, видна история из базы.")
     print("Остановить — Ctrl+C.")
     try:
         server.serve_forever()

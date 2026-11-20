@@ -6,7 +6,7 @@
     python main.py ask "роуминг" --card             как это выглядит в боте
     python main.py eval --split tune --errors       точность по набору
     python main.py bot                              Telegram + CRM операторов
-    python main.py crm                              только CRM, демо-клиент
+    python main.py crm                              только CRM, без Telegram
 
 Команды `ask` и `eval` работают без токена и без `python-telegram-bot`:
 функция `answer()` ядро проекта, а бот — надстройка над ней.
@@ -68,7 +68,7 @@ def command_bot(args: argparse.Namespace) -> int:
 
 
 def command_crm(args: argparse.Namespace) -> int:
-    """Веб-интерфейс операторов без Telegram: демо-клиент вместо абонента."""
+    """Веб-интерфейс операторов без Telegram: история, обучение, аналитика."""
     from faq_bot.crm.server import serve
 
     return serve(args.host, args.port)

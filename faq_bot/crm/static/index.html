@@ -6,12 +6,30 @@
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f5f5f7">
 <title>INAI Mobile · CRM</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23FFD100'/%3E%3Cpath d='M9 11.5A3.5 3.5 0 0 1 12.5 8h7A3.5 3.5 0 0 1 23 11.5v5a3.5 3.5 0 0 1-3.5 3.5H15l-4.5 4v-4.2A3.5 3.5 0 0 1 9 16.5z' fill='%23000'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23FFD100'/%3E%3Cpath d='M8 10a3.3 3.3 0 0 1 3.3-3.3h9.4A3.3 3.3 0 0 1 24 10v7.3a3.3 3.3 0 0 1-3.3 3.3h-4.8l-4.2 3.6c-.5.4-1 0-1-.5v-3.1A3.3 3.3 0 0 1 8 17.3z' fill='%23000'/%3E%3Crect x='12' y='14.3' width='2' height='3' rx='1' fill='%23FFD100'/%3E%3Crect x='15' y='12.3' width='2' height='5' rx='1' fill='%23FFD100'/%3E%3Crect x='18' y='10.3' width='2' height='7' rx='1' fill='%23FFD100'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/app.js" defer></script>
 </head>
 <body>
+<div class="preloader" id="preloader" aria-label="Загрузка" role="status">
+  <img id="preloader-img" src="/static/bee.gif" alt="" hidden>
+  <svg class="preloader-mark" id="preloader-mark" viewBox="0 0 48 48" aria-hidden="true">
+    <rect width="48" height="48" rx="12" fill="#FFD100"/>
+    <path d="M12 15a5 5 0 0 1 5-5h14a5 5 0 0 1 5 5v11a5 5 0 0 1-5 5h-7.2l-6.3 5.3c-.7.6-1.5.1-1.5-.7V31A5 5 0 0 1 12 26z" fill="#000"/>
+    <rect class="b1" x="18" y="21.5" width="3" height="4.5" rx="1.5" fill="#FFD100"/>
+    <rect class="b2" x="22.5" y="18.5" width="3" height="7.5" rx="1.5" fill="#FFD100"/>
+    <rect class="b3" x="27" y="15.5" width="3" height="10.5" rx="1.5" fill="#FFD100"/>
+  </svg>
+</div>
+
 <svg width="0" height="0" class="sprite" aria-hidden="true">
+  <symbol id="logo" viewBox="0 0 48 48"><rect width="48" height="48" rx="12" fill="#FFD100"/><path d="M12 15a5 5 0 0 1 5-5h14a5 5 0 0 1 5 5v11a5 5 0 0 1-5 5h-7.2l-6.3 5.3c-.7.6-1.5.1-1.5-.7V31A5 5 0 0 1 12 26z" fill="#000"/><rect x="18" y="21.5" width="3" height="4.5" rx="1.5" fill="#FFD100"/><rect x="22.5" y="18.5" width="3" height="7.5" rx="1.5" fill="#FFD100"/><rect x="27" y="15.5" width="3" height="10.5" rx="1.5" fill="#FFD100"/></symbol>
+  <symbol id="ill-chats" viewBox="0 0 160 120"><path d="M30 30a10 10 0 0 1 10-10h50a10 10 0 0 1 10 10v26a10 10 0 0 1-10 10H58l-14 11v-11h-4a10 10 0 0 1-10-10z" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/><path d="M62 54a10 10 0 0 1 10-10h48a10 10 0 0 1 10 10v24a10 10 0 0 1-10 10h-4v11l-14-11H72a10 10 0 0 1-10-10z"/><circle cx="82" cy="66" r="4" fill="currentColor"/><circle cx="96" cy="66" r="4" fill="currentColor"/><circle cx="110" cy="66" r="4" fill="currentColor"/><path d="M44 36h36 M44 46h24" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></symbol>
+  <symbol id="ill-done" viewBox="0 0 160 120"><rect x="38" y="26" width="72" height="80" rx="10" fill="none" stroke="currentColor" stroke-width="2.5"/><rect x="48" y="16" width="72" height="80" rx="10" fill="none" stroke="currentColor" stroke-width="2.5" opacity=".45"/><path d="M52 50h30 M52 62h44 M52 74h22" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><circle cx="108" cy="86" r="18"/><path d="m99 86 6 6 12-12" fill="none" stroke="#000" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="ill-learn" viewBox="0 0 160 120"><path d="M80 34c-12-8-30-10-46-6v62c16-4 34-2 46 6 12-8 30-10 46-6V28c-16-4-34-2-46 6z" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/><path d="M80 34v62" stroke="currentColor" stroke-width="2.5"/><path d="M96 26v30l8-6 8 6V24"/><path d="M44 48c10-2 20-1 28 3 M44 60c10-2 20-1 28 3 M44 72c10-2 20-1 28 3" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity=".55"/></symbol>
+  <symbol id="ill-propose" viewBox="0 0 160 120"><path d="M46 18h46l22 22v62a8 8 0 0 1-8 8H46a8 8 0 0 1-8-8V26a8 8 0 0 1 8-8z" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/><path d="M92 18v22h22" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/><path d="M52 54h40 M52 66h30" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><path d="m88 96 34-34a6 6 0 0 1 8.5 8.5l-34 34L84 108z"/><path d="m118 66 8.5 8.5" stroke="#000" stroke-width="2.5"/></symbol>
+  <symbol id="ill-chart" viewBox="0 0 160 120"><path d="M30 20v80h104" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><rect x="44" y="64" width="14" height="28" rx="3" fill="none" stroke="currentColor" stroke-width="2.5" stroke-dasharray="5 4"/><rect x="68" y="48" width="14" height="44" rx="3" fill="none" stroke="currentColor" stroke-width="2.5" stroke-dasharray="5 4"/><rect x="92" y="34" width="14" height="58" rx="3"/><rect x="116" y="56" width="14" height="36" rx="3" fill="none" stroke="currentColor" stroke-width="2.5" stroke-dasharray="5 4"/></symbol>
+  <symbol id="ill-desk" viewBox="0 0 200 150"><rect x="62" y="10" width="76" height="132" rx="16" fill="none" stroke="currentColor" stroke-width="3"/><path d="M90 20h20" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><rect x="72" y="36" width="44" height="16" rx="8" fill="none" stroke="currentColor" stroke-width="2.5"/><rect x="86" y="60" width="42" height="16" rx="8"/><rect x="72" y="84" width="52" height="16" rx="8" fill="currentColor" opacity=".9"/><rect x="72" y="108" width="32" height="16" rx="8" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M18 64a12 12 0 0 1 12-12h20 M182 94a12 12 0 0 1-12 12h-20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" opacity=".45"/><circle cx="34" cy="86" r="10"/><path d="M28 110c2-7 10-10 12-10s10 3 12 10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><circle cx="166" cy="50" r="10" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M154 76c2-7 10-10 12-10s10 3 12 10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></symbol>
   <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.2 3.4c-.5.4-1.3 0-1.3-.6V17A2.5 2.5 0 0 1 4 14.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
   <symbol id="i-learn" viewBox="0 0 24 24"><path d="M12 4 2.5 9 12 14l9.5-5z M6 11.2V16c0 1.4 2.7 3 6 3s6-1.6 6-3v-4.8 M21.5 9v5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20h16 M7 16v-5 M12 16V6 M17 16v-8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
@@ -32,16 +50,19 @@
   <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5 M12 8h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
   <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11 M7.5 10.5 12 15l4.5-4.5 M5 19.5h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-team" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M3 19.5c.6-3.2 3.1-5 6-5s5.4 1.8 6 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M15.5 5.6a3.3 3.3 0 0 1 0 6.1 M17.5 14.8c1.7.6 3 2.2 3.5 4.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m11 12 8.5-8.5 M16.5 6.5l2.5 2.5 M14 9l2 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
 </svg>
 
 <div id="login" class="login" hidden>
   <form class="login-card" id="login-form" autocomplete="on">
-    <div class="brand-mark"><svg><use href="#i-chat"/></svg></div>
-    <h1>INAI Mobile · CRM</h1>
-    <p class="muted">Рабочее место оператора поддержки</p>
-    <label>Имя оператора<input name="name" required maxlength="40" autocomplete="username" placeholder="например, Айгуль"></label>
-    <label>Пароль<input name="password" type="password" required autocomplete="current-password" placeholder="CRM_PASSWORD"></label>
+    <svg class="ill login-ill" aria-hidden="true"><use href="#ill-desk"/></svg>
+    <div class="login-brand"><svg class="logo"><use href="#logo"/></svg><span>INAI Mobile</span></div>
+    <h1>Рабочее место оператора</h1>
+    <p class="muted">Очередь обращений, перехват диалогов у бота и его обучение.</p>
+    <label>Логин<input name="login" required maxlength="32" autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+    <label>Пароль<input name="password" type="password" required autocomplete="current-password"></label>
     <p class="login-error" id="login-error" role="alert"></p>
     <button class="btn primary wide" type="submit">Войти</button>
   </form>
@@ -49,12 +70,12 @@
 
 <div id="app" class="app" hidden>
   <nav class="rail" aria-label="Разделы">
-    <div class="brand-mark small" title="INAI Mobile"><svg><use href="#i-chat"/></svg></div>
+    <svg class="logo rail-logo" role="img" aria-label="INAI Mobile"><use href="#logo"/></svg>
     <button class="rail-btn" data-view="chats" title="Диалоги"><svg><use href="#i-chat"/></svg><span>Диалоги</span><i class="rail-badge" id="badge-waiting" hidden></i></button>
     <button class="rail-btn" data-view="learning" title="Обучение бота"><svg><use href="#i-learn"/></svg><span>Обучение</span><i class="rail-badge soft" id="badge-queue" hidden></i></button>
     <button class="rail-btn" data-view="analytics" title="Аналитика"><svg><use href="#i-chart"/></svg><span>Аналитика</span></button>
+    <button class="rail-btn admin-only" data-view="team" title="Операторы"><svg><use href="#i-team"/></svg><span>Операторы</span></button>
     <div class="rail-spacer"></div>
-    <button class="rail-btn" id="demo-open" title="Демо-клиент: написать боту от имени абонента"><svg><use href="#i-phone"/></svg><span>Демо</span></button>
     <button class="rail-btn" id="theme-toggle" title="Тема"><svg><use href="#i-moon"/></svg><span>Тема</span></button>
     <button class="rail-btn" id="logout" title="Выйти"><svg><use href="#i-logout"/></svg><span>Выход</span></button>
   </nav>
@@ -79,10 +100,9 @@
 
     <main class="chat-pane" id="chat-pane">
       <div class="empty-state" id="chat-empty">
-        <div class="empty-art"><svg><use href="#i-chat"/></svg></div>
+        <svg class="ill empty-ill" aria-hidden="true"><use href="#ill-chats"/></svg>
         <h3>Выберите диалог</h3>
         <p class="muted">Сверху очереди — те, кто ждёт дольше всех. Новые сообщения их не вытесняют.</p>
-        <button class="btn ghost" id="empty-demo"><svg><use href="#i-phone"/></svg>Написать боту как абонент</button>
       </div>
       <div class="chat" id="chat" hidden>
         <header class="chat-head">
@@ -140,6 +160,36 @@
     </div>
   </section>
 
+  <section class="view view-team" data-pane="team" hidden>
+    <header class="page-head">
+      <div>
+        <h2>Операторы</h2>
+        <p class="muted">Учётные записи создаёт и отключает администратор. Пароли хранятся только в виде хэша: восстановить их нельзя, можно задать новый.</p>
+      </div>
+    </header>
+    <div class="team-grid">
+      <section class="card">
+        <header class="card-head"><h3>Команда</h3><span class="count" id="team-count">0</span></header>
+        <div class="team-list" id="team-list"></div>
+      </section>
+      <section class="card">
+        <header class="card-head"><h3>Новый оператор</h3></header>
+        <form class="form" id="team-form" autocomplete="off">
+          <label>Имя<input name="name" required maxlength="40" placeholder="Айгуль Асанова"></label>
+          <label>Логин<input name="login" required maxlength="32" pattern="[a-z0-9._\-]{3,32}" placeholder="aigul" autocapitalize="none" spellcheck="false"></label>
+          <label>Пароль<input name="password" required minlength="6" type="text" autocomplete="new-password" placeholder="не короче 6 символов"></label>
+          <label>Роль
+            <span class="chips" role="radiogroup">
+              <label class="chip-radio"><input type="radio" name="role" value="operator" checked><span>Оператор</span></label>
+              <label class="chip-radio"><input type="radio" name="role" value="admin"><span>Администратор</span></label>
+            </span>
+          </label>
+          <button class="btn primary wide" type="submit">Создать</button>
+        </form>
+      </section>
+    </div>
+  </section>
+
   <section class="view view-analytics" data-pane="analytics" hidden>
     <header class="page-head">
       <div>
@@ -157,20 +207,6 @@
     </div>
   </section>
 </div>
-
-<aside class="demo" id="demo" hidden aria-label="Демо-клиент">
-  <header class="demo-head">
-    <div><b>Демо-клиент</b><span class="muted" id="demo-name"></span></div>
-    <button class="icon-btn" id="demo-new" title="Новый абонент"><svg><use href="#i-plus"/></svg></button>
-    <button class="icon-btn" id="demo-close" title="Закрыть"><svg><use href="#i-x"/></svg></button>
-  </header>
-  <div class="demo-screen" id="demo-screen"></div>
-  <form class="demo-input" id="demo-form">
-    <input id="demo-text" autocomplete="off" maxlength="1000" placeholder="Сообщение от абонента…">
-    <button class="send small" aria-label="Отправить"><svg><use href="#i-send"/></svg></button>
-  </form>
-  <div class="demo-hints" id="demo-hints"></div>
-</aside>
 
 <div class="popover" id="popover" hidden></div>
 <div class="toasts" id="toasts" aria-live="polite"></div>
