@@ -126,6 +126,14 @@ NO_LIBRARY_MESSAGE = (
     "работают без неё."
 )
 
+# CRM операторов (faq_bot.crm). None — бот работает сам, как раньше.
+# Все обращения к CRM обёрнуты в try: её сбой не имеет права сломать ответ.
+CRM: Any | None = None
+
+# Последний результат поиска по чату: нужен CRM, чтобы показать оператору
+# тему и уверенность ответа и поставить непонятую реплику в обучение.
+_last_reply: dict[str, Reply] = {}
+
 # Язык интерфейса по чатам: последний определённый или выбранный кнопкой.
 _chat_language: dict[str, str] = {}
 # Чаты, где язык выбран кнопкой вручную: автоопределение больше не спорит.
@@ -646,6 +654,7 @@ def reset_runtime_state() -> None:
     """
     global _throttle, _flow
     _chat_language.clear()
+    _last_reply.clear()
     _chat_language_pinned.clear()
     _chat_language_streak.clear()
     if _throttle is not None:
@@ -702,6 +711,11 @@ def _operator_screen(chat_id: int | str | None,
         language = chat_language(chat_id)
     if reason:
         _record_handoff(chat_id, reason, language, reply)
+    if CRM is not None and chat_id is not None:
+        try:
+            CRM.request_operator(chat_id, reason)
+        except Exception:
+            logger.exception("CRM: передача оператору не записана")
     return presentation.operator_screen(entry_by_id(operator.faq_id),
                                         language, reason, note)
 
@@ -737,6 +751,7 @@ def screen_for_text(text: str,
     получил предупреждение.
     """
     stripped = (text or "").strip()
+    _last_reply.pop(_key(chat_id), None)
     language = reply_language(chat_id, stripped)
     if not stripped:
         return presentation.menu_screen(language)
@@ -789,6 +804,7 @@ def screen_for_text(text: str,
         STATS.rollback()
 
     reply = respond(stripped, chat_id=chat_id, language=language)
+    _last_reply[_key(chat_id)] = reply
     set_chat_language(chat_id, reply.lang)
     # Что бот ответил на этот вопрос — пригодится карточке обращения,
     # если следом абонент попросит человека: оператор увидит не только
@@ -1049,6 +1065,78 @@ def stats_screen(chat_id: int | str | None = None) -> Screen:
     """Экран /stats: агрегат неотвеченных вопросов без персональных данных."""
     return presentation.stats_screen(stats_snapshot(), all_entries(),
                                      chat_language(chat_id))
+
+
+# --------------------------------------------------------------------------
+# CRM: журнал переписки и перехват диалога оператором
+# --------------------------------------------------------------------------
+
+def attach_crm(hub: Any | None) -> None:
+    """Подключить CRM к боту (или отключить, передав None)."""
+    global CRM
+    CRM = hub
+
+
+def _screen_buttons(screen: Screen) -> list[list[str]]:
+    return [[button.label, button.action] for button in screen.buttons]
+
+
+def crm_log_bot(hub: Any, chat_id: int | str, screen: Screen,
+                replace: bool = False) -> None:
+    """Записать ответ бота в CRM вместе с темой и уверенностью поиска."""
+    reply = _last_reply.pop(_key(chat_id), None)
+    try:
+        hub.bot_reply(
+            chat_id, presentation.plain_text(screen),
+            faq_id=reply.faq_id if reply else None,
+            confidence=round(reply.confidence, 3) if reply else None,
+            searched=reply is not None,
+            lang=reply.lang if reply else None,
+            buttons=_screen_buttons(screen), replace=replace)
+    except Exception:
+        logger.exception("CRM: ответ бота не записан")
+
+
+def crm_incoming(hub: Any, chat_id: int | str, text: str, title: str = "",
+                 username: str = "", source: str = "telegram") -> bool:
+    """Записать реплику абонента. True — диалог ведёт человек, бот молчит."""
+    try:
+        hub.client_message(chat_id, text, title=title, username=username,
+                           source=source)
+        return bool(hub.is_human(chat_id))
+    except Exception:
+        logger.exception("CRM: реплика абонента не записана")
+        return False
+
+
+def crm_client_turn(hub: Any, chat_id: int | str, text: str, title: str = "",
+                    source: str = "demo") -> Screen | None:
+    """Полный ход абонента без Telegram: так работает демо-клиент CRM.
+
+    Путь тот же, что у настоящего сообщения: запись в журнал, проверка
+    перехвата, `screen_for_text`, запись ответа.
+    """
+    if crm_incoming(hub, chat_id, text, title=title, source=source):
+        return None
+    screen = screen_for_text(text, chat_id)
+    if screen is not None:
+        crm_log_bot(hub, chat_id, screen)
+    return screen
+
+
+def crm_button(hub: Any, chat_id: int | str, action: str) -> Screen:
+    """Нажатие кнопки демо-абонентом: экран переписывает прошлый ответ."""
+    screen = screen_for_action(action, chat_id)
+    crm_log_bot(hub, chat_id, screen, replace=True)
+    return screen
+
+
+def _who(update: Any) -> tuple[str, str]:
+    user = getattr(update, "effective_user", None)
+    if user is None:
+        return "", ""
+    return (getattr(user, "full_name", "") or "",
+            getattr(user, "username", "") or "")
 
 
 # --------------------------------------------------------------------------
@@ -1336,6 +1424,14 @@ async def _on_text(update: Any, context: Any) -> None:
     text = message.text or ""
     flow = conversation()
 
+    hub = CRM
+    if hub is not None:
+        title, username = _who(update)
+        if crm_incoming(hub, chat_id, text, title=title, username=username):
+            # Диалог ведёт оператор: бот молчит, реплика уже в CRM.
+            flow.close(chat_id)
+            return
+
     if flow.classify(chat_id, text) == "revision":
         joined = flow.extend(chat_id, text)
         screen = screen_for_text(joined, chat_id, revision=True)
@@ -1343,6 +1439,8 @@ async def _on_text(update: Any, context: Any) -> None:
             return
         screen = presentation.with_revision_note(screen,
                                                  chat_language(chat_id))
+        if hub is not None:
+            crm_log_bot(hub, chat_id, screen, replace=True)
         if await _rewrite(flow.handle(chat_id), screen) != "failed":
             await _note_handoff(context, chat_id, screen,
                                 flow.handle(chat_id))
@@ -1357,6 +1455,8 @@ async def _on_text(update: Any, context: Any) -> None:
     if screen is None:
         flow.close(chat_id)
         return
+    if hub is not None:
+        crm_log_bot(hub, chat_id, screen)
     flow.opened(chat_id, text, await _send(message, screen))
     await _note_handoff(context, chat_id, screen, flow.handle(chat_id))
 
@@ -1466,9 +1566,20 @@ async def _on_voice(update: Any, context: Any) -> None:
     heard = transcript.text.strip()
     logger.info("чат %s: распознано %.1f с речи, %d знаков",
                 chat_id, transcript.seconds, len(heard))
+    hub = CRM
+    if hub is not None:
+        title, username = _who(update)
+        if crm_incoming(hub, chat_id, f"🎤 {heard}", title=title,
+                        username=username):
+            # Оператор ведёт диалог: распознанный текст ему, ответа бота нет.
+            await _deliver(message, waiting, presentation.Screen(
+                text="🎤 " + presentation.html.escape(heard)))
+            return
     screen = screen_for_text(heard, chat_id, metered=False)
     if screen is None:                             # pragma: no cover
         return
+    if hub is not None:
+        crm_log_bot(hub, chat_id, screen)
     await _deliver(message, waiting,
                    presentation.with_heard(screen, heard,
                                            chat_language(chat_id)))
@@ -1494,6 +1605,8 @@ async def _on_button(update: Any, context: Any) -> None:
     chat_id = update.effective_chat.id
     conversation().close(chat_id)
     screen = screen_for_action(query.data or "", chat_id)
+    if CRM is not None:
+        crm_log_bot(CRM, chat_id, screen, replace=True)
     await _edit(query, screen)
 
     # Кнопка «0 Оператор» — такая же передача человеку, как слово
@@ -1523,7 +1636,8 @@ def _operator_chat_filter() -> Any | None:
     return chat & ~filters.COMMAND
 
 
-def build_application(token: str) -> Any:
+def build_application(token: str,
+                      post_init: Callable[[Any], Any] | None = None) -> Any:
     """Собрать приложение Telegram. Библиотека импортируется здесь.
 
     Порядок обработчиков значим: Telegram-библиотека отдаёт обновление
@@ -1540,7 +1654,10 @@ def build_application(token: str) -> Any:
         filters,
     )
 
-    application = ApplicationBuilder().token(token).build()
+    builder = ApplicationBuilder().token(token)
+    if post_init is not None:
+        builder = builder.post_init(post_init)
+    application = builder.build()
     application.add_handler(CommandHandler("start", _on_start))
     application.add_handler(CommandHandler("help", _on_help))
     application.add_handler(CommandHandler("stats", _on_stats))
@@ -1619,18 +1736,42 @@ def token_from_env_file(name: str = TOKEN_ENV) -> str:
     return handoff.from_env_file(name)
 
 
-def run(token: str | None = None) -> int:
-    """Запустить бота. Возвращает код выхода, исключений наружу не бросает."""
+def _telegram_sender(application: Any, loop: asyncio.AbstractEventLoop
+                     ) -> Callable[[str, str], bool]:
+    """Доставка сообщения оператора из потока веб-сервера в Telegram."""
+    def send(chat_id: str, text: str) -> bool:
+        future = asyncio.run_coroutine_threadsafe(
+            application.bot.send_message(chat_id=int(chat_id), text=text), loop)
+        future.result(timeout=20)
+        return True
+    return send
+
+
+def run(token: str | None = None, crm: bool = True) -> int:
+    """Запустить бота. Возвращает код выхода, исключений наружу не бросает.
+
+    `crm=True` поднимает рядом веб-интерфейс операторов (faq_bot.crm).
+    """
     token = (token or os.environ.get(TOKEN_ENV) or token_from_env_file()).strip()
     if not token:
         print(NO_TOKEN_MESSAGE)
         return 2
 
+    async def _post_init(application: Any) -> None:
+        if CRM is not None:
+            CRM.set_sender(_telegram_sender(application,
+                                            asyncio.get_running_loop()))
+
     try:
-        application = build_application(token)
+        application = build_application(token, post_init=_post_init)
     except ImportError:
         print(NO_LIBRARY_MESSAGE)
         return 2
+
+    if crm:
+        from .crm import server as crm_server
+
+        attach_crm(crm_server.start_in_background().hub)
 
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
