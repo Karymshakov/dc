@@ -348,7 +348,8 @@ def ussd_block(codes: Sequence[str],
 
 def answer_card(reply: Reply, mark: str | None = None,
                 note: str | None = None,
-                rows: tuple[tuple[Button, ...], ...] | None = None) -> Screen:
+                rows: tuple[tuple[Button, ...], ...] | None = None,
+                body: str | None = None) -> Screen:
     """Карточка ответа на языке абонента с учётом светофора уверенности.
 
     🟢 — ответ сразу; 🟡 — ответ и «может быть, вы про это?» с кнопками;
@@ -357,6 +358,11 @@ def answer_card(reply: Reply, mark: str | None = None,
     Второго перевода в карточке нет: ТЗ требует отвечать на языке
     вопроса, а не на двух сразу. Если язык определился неверно, абонент
     нажимает 🇰🇬/🇷🇺 — и эта же карточка перерисовывается на другом языке.
+
+    `body` подменяет текст ответа переформулировкой из
+    :mod:`faq_bot.rephrase`. Заголовок, светофор, блок USSD и кнопки
+    остаются прежними: модели доверена только формулировка, а коды и
+    цены по-прежнему берутся из записи базы.
 
     `mark`, `note` и `rows` нужны «закрытым» видам той же карточки —
     после «Понятно» и «Другого вопроса». Текст ответа там обязан
@@ -377,7 +383,7 @@ def answer_card(reply: Reply, mark: str | None = None,
         carried = _t(language, "по предыдущей теме", "мурунку тема боюнча")
         lines.append(f"<i>↪ {_esc(carried)}</i>")
     lines.append("")
-    lines.append(_esc(entry.answer(language)))
+    lines.append(_esc(body if body else entry.answer(language)))
 
     # Код ищем в обоих переводах: в кыргызском тексте темы он иногда
     # записан, а в русском — нет, и наоборот.

@@ -29,3 +29,8 @@ bot_err.log
 
 # База CRM: переписка абонентов, в репозиторий не попадает
 data/crm.sqlite3*
+
+# Рабочие материалы команды, в поставку не входят
+.claude/
+CONTRIBUTING.md
+docs/HANDOFF.md

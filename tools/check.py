@@ -112,32 +112,54 @@ def check_contract() -> list[Step]:
     return steps
 
 
-def check_accuracy() -> list[Step]:
-    """Точность против порогов зачёта."""
+def _shares(args: list[str]) -> dict[str, float] | str:
+    """Прогнать измерение и достать три доли. Строка — текст ошибки."""
     code = (
         "import sys; sys.path.insert(0, '.');"
-        "sys.argv = ['evaluate', '--split', 'tune'];"
+        f"sys.argv = ['evaluate'] + {args!r};"
         "import runpy; runpy.run_path('tools/evaluate.py', run_name='__main__')"
     )
     ok, output = run([sys.executable, "-I", "-c", code])
     if not ok:
-        return [Step("прогон точности", False, output.strip()[-200:])]
+        return output.strip()[-200:]
 
-    steps: list[Step] = []
-    for label, threshold, key in (("top-1", JURY_TOP1, "top-1"),
-                                  ("top-3", JURY_TOP3, "top-3"),
-                                  ("язык", JURY_LANG, "язык")):
+    shares: dict[str, float] = {}
+    for key in ("top-1", "top-3", "язык"):
         line = next((row for row in output.splitlines() if key in row), "")
-        share = 0.0
         for token in line.split():
             if token.endswith("%"):
                 try:
-                    share = float(token.rstrip("%")) / 100
+                    shares[key] = float(token.rstrip("%")) / 100
                 except ValueError:
                     pass
                 break
-        steps.append(Step(f"{label} на tune не ниже {threshold:.0%}",
-                          share >= threshold, f"{share:.1%}"))
+    return shares
+
+
+#: Что меряем и как подписываем. Первый набор — тот, по которому
+#: настраивались: на нём 100%, и сам по себе он ничего не доказывает.
+#: Второй — 124 вопроса, сочинённых с нуля; это и есть главная цифра,
+#: и она обязана держать те же пороги жюри.
+MEASUREMENTS = (
+    ("tune", ["--split", "tune"]),
+    ("независимых 124", ["--file", "data/05_support/independent/all.csv"]),
+)
+
+
+def check_accuracy() -> list[Step]:
+    """Точность против порогов зачёта на обоих наборах."""
+    steps: list[Step] = []
+    for name, args in MEASUREMENTS:
+        shares = _shares(args)
+        if isinstance(shares, str):
+            steps.append(Step(f"прогон точности ({name})", False, shares))
+            continue
+        for label, threshold in (("top-1", JURY_TOP1),
+                                 ("top-3", JURY_TOP3),
+                                 ("язык", JURY_LANG)):
+            share = shares.get(label, 0.0)
+            steps.append(Step(f"{label} на {name} не ниже {threshold:.0%}",
+                              share >= threshold, f"{share:.1%}"))
     return steps
 
 

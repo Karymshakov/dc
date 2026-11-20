@@ -606,7 +606,9 @@ def respond(text: str,
     бросает» для любого входа, а не только для текста.
     """
     if isinstance(text, str):
-        raw = text
+        # Обрезка до разбора: см. config.MAX_INPUT_CHARS — на одном
+        # длинном слове стоимость поиска растёт квадратично.
+        raw = text[:config.MAX_INPUT_CHARS]
     else:
         if text is not None:
             logger.warning("вход типа %s вместо строки: честный отказ",

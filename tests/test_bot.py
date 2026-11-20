@@ -2084,3 +2084,162 @@ def test_a_bare_request_for_a_human_is_honest_in_the_card(monkeypatch):
     assert "своего вопроса нет" in card
     assert "ответа не нашёл" not in card
     assert "Попросили оператора" in card
+
+
+# --------------------------------------------------------------------------
+# Переформулировка ответа моделью: бонус «LLM с RAG по FAQ»
+# --------------------------------------------------------------------------
+#
+# Главное требование к этому слою не «ответ стал красивее», а «абонент
+# ничего не ждёт и ничего не теряет». Поэтому тесты ниже проверяют
+# порядок событий и неизменность фактов, а не качество формулировки.
+
+#: Честная переформулировка темы 1 под разговорный вопрос: код тот же,
+#: новых цифр нет, длина не выросла, язык русский.
+GOOD = "На счету смотрите через *100#, это бесплатно."
+
+#: Нечестная: код настоящий, но принадлежит другой теме. Ровно случай
+#: D-09 — абонент наберёт рабочую команду и получит не то.
+FOREIGN_CODE = "Баланс смотрите через *111#, это бесплатно."
+
+#: Выдуманная цифра, которой нет в записи базы.
+INVENTED_NUMBER = "Наберите *100#, проверка бесплатна 3 раза в сутки."
+
+
+class _FakeModel:
+    """Транспорт переформулировки: отдаёт заготовленный текст."""
+
+    def __init__(self, *replies: str) -> None:
+        self.replies = list(replies)
+        self.calls: list[dict] = []
+
+    def __call__(self, url: str, body: dict, timeout: float = 0.0,
+                 *, api_key: str = "") -> dict:
+        self.calls.append(body)
+        text = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+
+
+@pytest.fixture
+def model(monkeypatch):
+    """Переформулировка включена, сеть подменена. Возвращает установщик."""
+    from faq_bot import rephrase
+
+    rephrase.reset()
+    monkeypatch.setattr(rephrase, "ENABLED", True)
+    monkeypatch.setattr(rephrase, "api_key", lambda: "ключ-для-теста")
+
+    def install(*replies: str) -> _FakeModel:
+        fake = _FakeModel(*replies)
+        monkeypatch.setattr(rephrase, "transport", fake)
+        return fake
+
+    yield install
+    rephrase.reset()
+
+
+def test_base_answer_is_shown_first_and_then_rewritten(model):
+    """Абонент получает ответ базы сразу, формулировку модели — правкой.
+
+    Это главное свойство всей затеи: сетевой вызов не задерживает показ
+    готового ответа. В чате обязано остаться ОДНО сообщение, а не два.
+    """
+    fake = model(GOOD)
+    chat = _Dialog(9100)
+
+    chat.says("скока денег на счету")
+
+    assert len(chat.sent) == 1, "переформулировка не смеет плодить сообщения"
+    sent = chat.sent[0]
+    # Первым в чате появился дословный текст базы.
+    assert "*100#. Проверка бесплатная." in sent.edits[0][0] or \
+           "*100#" in sent.edits[0][0]
+    # И ровно одна правка — ею пришла формулировка модели.
+    assert len(sent.edits) == 1
+    assert "смотрите через *100#" in chat.last
+    assert len(fake.calls) == 1
+
+
+def test_only_the_body_changes(model):
+    """Меняется только тело ответа. Остальное — от записи базы.
+
+    Проверяются обе стороны разом, иначе тест проходил бы и при
+    выключенном подключении: формулировка модели обязана появиться,
+    а заголовок, светофор и блок USSD — остаться.
+    """
+    model(GOOD)
+    chat = _Dialog(9101)
+
+    chat.says("скока денег на счету")
+
+    assert "смотрите через *100#" in chat.last, "формулировка модели не видна"
+    assert "Проверка бесплатная." not in chat.last, "тело базы не заменено"
+    assert "Как проверить баланс?" in chat.last, "заголовок темы потерян"
+    assert "🟢" in chat.last, "светофор потерян"
+    assert "*100#" in chat.last, "код потерян"
+
+
+def test_foreign_code_leaves_the_base_answer(model):
+    """Сторож фактов поймал чужой код — сообщение не переписывается вовсе."""
+    model(FOREIGN_CODE)
+    chat = _Dialog(9102)
+
+    chat.says("скока денег на счету")
+
+    assert chat.sent[0].edits == [], "ответ со чужим кодом попал абоненту"
+    assert "*111#" not in chat.last
+    assert "*100#" in chat.last
+
+
+def test_invented_number_leaves_the_base_answer(model):
+    """Цифры, которой нет в записи базы, абонент не увидит."""
+    model(INVENTED_NUMBER)
+    chat = _Dialog(9103)
+
+    chat.says("скока денег на счету")
+
+    assert chat.sent[0].edits == []
+    assert "3 раза" not in chat.last
+
+
+def test_model_is_silent_when_disabled(monkeypatch):
+    """Выключенная переформулировка не обращается к сети ни разу."""
+    from faq_bot import rephrase
+
+    def forbidden(*args: object, **kwargs: object) -> dict:
+        raise AssertionError("выключенный модуль полез в сеть")
+
+    rephrase.reset()
+    monkeypatch.setattr(rephrase, "ENABLED", False)
+    monkeypatch.setattr(rephrase, "transport", forbidden)
+    chat = _Dialog(9104)
+
+    chat.says("скока денег на счету")
+
+    assert chat.sent[0].edits == []
+    assert "*100#" in chat.last
+
+
+def test_refusal_never_reaches_the_model(model):
+    """Отказ модели не показывают: переписывать нечего, платить не за что.
+
+    Красный светофор означает, что темы нет. Отдать модели нечего:
+    записи базы для пересказа не существует, а выдумывать ответ —
+    ровно то, чего мы не делаем.
+    """
+    fake = model(GOOD)
+    chat = _Dialog(9105)
+
+    chat.says(OUT_OF_SCOPE)
+
+    assert fake.calls == [], "за отказ заплатили модели"
+    assert chat.sent[0].edits == []
+
+
+def test_repeated_question_costs_nothing(model):
+    """Второй такой же вопрос берётся из кеша, второго вызова нет."""
+    fake = model(GOOD)
+    _Dialog(9106).says("скока денег на счету")
+    _Dialog(9107).says("скока денег на счету")
+
+    assert len(fake.calls) == 1, "за повтор вопроса заплатили дважды"

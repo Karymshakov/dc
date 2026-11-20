@@ -39,3 +39,37 @@ def clean_state():
     reset()
     yield
     reset()
+
+
+@pytest.fixture(autouse=True)
+def model_is_off_unless_a_test_asks():
+    """Ни один тест не обращается к настоящей модели без спроса.
+
+    Переформулировка вызывается из обработчика текста, поэтому при
+    `REPHRASE_ENABLED=1` в `.env` разработчика **любой** тест переписки
+    уходил бы в сеть. Это не теория: первый же прогон после подключения
+    дал пять падений, а числа менялись от запуска к запуску — тесты
+    сравнивали дословный текст базы с тем, что в этот раз сочинила
+    модель. Платил бы при этом владелец ключа.
+
+    Поэтому модуль здесь выключен, а транспорт заменён на запрещающий:
+    тест, которому модель нужна, включает её сам и подставляет свой
+    ответ. Прежние значения возвращаются после теста — иначе
+    выключатель остался бы сломанным для остального прогона.
+    """
+    from faq_bot import rephrase
+
+    saved_enabled = rephrase.ENABLED
+    saved_transport = rephrase.transport
+
+    def forbidden(*args: object, **kwargs: object) -> dict:
+        raise AssertionError(
+            "тест обратился к настоящей модели: нужен подменный транспорт")
+
+    rephrase.ENABLED = False
+    rephrase.transport = forbidden
+    rephrase.reset()
+    yield
+    rephrase.ENABLED = saved_enabled
+    rephrase.transport = saved_transport
+    rephrase.reset()

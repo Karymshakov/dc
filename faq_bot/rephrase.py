@@ -332,16 +332,23 @@ def build_prompt(question: str, answer: str, language: str) -> str:
     )
 
 
-def transport(url: str, body: dict, timeout: float = TIMEOUT_SECONDS) -> dict:
+def transport(url: str, body: dict, timeout: float = TIMEOUT_SECONDS,
+              *, api_key: str = "") -> dict:
     """Единственное место, где модуль выходит в сеть.
 
     Вынесено отдельной функцией ради тестов: они подменяют её целиком и
     поэтому не могут случайно обратиться к настоящему API.
+
+    Ключ приходит отдельным доводом и уходит заголовком, а не в строке
+    адреса: адрес попадает в журналы посредников и в текст исключений.
     """
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["x-goog-api-key"] = api_key
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -410,6 +417,29 @@ def invented_numbers(text: str, entry: FaqEntry) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for item in found if item not in allowed))
 
 
+def dropped_numbers(text: str, base: str) -> tuple[str, ...]:
+    """Числа ответа базы, которых в переформулировке не стало.
+
+    Правило «новых цифр не бывает» несимметрично, и одного его мало.
+    Замер на настоящей модели, шесть разговорных вопросов: из четырёх
+    принятых переформулировок ДВЕ молча выбросили цену. «Разовый сбор
+    50 сом» стал «разовым сбором», «1 ГБ — 30 сом, 5 ГБ — 100 сом» —
+    «нужным объёмом». Сторож связей это пропускает: он проверяет, что
+    показанный факт принадлежит теме, а не что он вообще показан.
+
+    Добавленная цифра — выдумка, потерянная — обман умолчанием: абонент
+    уходит, не узнав, сколько это стоит, и узнает из счёта. Для
+    справочной оператора связи это одинаково непригодно.
+
+    Сравнение с ответом на языке абонента, а не со всей записью: второй
+    перевод абоненту не показывали, и требовать его чисел не за что.
+    """
+    required = DIGITS_PATTERN.findall(base)
+    present = set(DIGITS_PATTERN.findall(text))
+    return tuple(dict.fromkeys(item for item in required
+                               if item not in present))
+
+
 def _rejection(text: str, entry: FaqEntry, language: str,
                base: str) -> tuple[str, consistency.Verdict] | None:
     """Почему переформулировку нельзя показывать. None — можно.
@@ -424,6 +454,10 @@ def _rejection(text: str, entry: FaqEntry, language: str,
     invented = invented_numbers(text, entry)
     if invented:
         return f"выдуманные числа: {', '.join(invented)}", verdict
+
+    dropped = dropped_numbers(text, base)
+    if dropped:
+        return f"потерянные числа: {', '.join(dropped)}", verdict
 
     if len(text) > MAX_LENGTH_RATIO * len(base):
         return (f"длиннее исходного в {len(text) / len(base):.1f} раза",
@@ -496,13 +530,13 @@ def _rephrase(question: str, entry: FaqEntry, language: str, base: str,
                        chat_id, limit_reason)
         return Rephrased(base, SKIPPED, reason=limit_reason)
 
-    url = ENDPOINT.format(model=model) + f"?key={api}"
+    url = ENDPOINT.format(model=model)
     body = _request_body(build_prompt(question, base, language))
 
     # Списываем попытку до обращения к сети: см. CallBudget.record.
     BUDGET.record(chat_id)
     try:
-        payload = transport(url, body)
+        payload = transport(url, body, api_key=api)
     except Exception as error:                      # сеть, таймаут, разбор
         logger.warning("Модель не ответила: %s", error)
         return Rephrased(base, FAQ, reason=f"модель недоступна: {error}")
