@@ -27,6 +27,7 @@ from faq_bot.knowledge import (
     content_terms,
     default_faq,
     distinctive_terms,
+    is_action,
     tokens,
 )
 
@@ -199,6 +200,17 @@ class FuzzySearch:
                 covered += weight * best
         return covered / total if total else 0.0
 
+    def _topics_with_any(self, terms: list[tuple[str, ...]]) -> set[int]:
+        """Темы, у которых есть слово, похожее хотя бы на одно из terms."""
+        found: set[int] = set()
+        for faq_id, words in self.topic_tokens.items():
+            for term in terms:
+                if any(token_similarity(variant, word) >= PAIR_THRESHOLD
+                       for variant in term for word in words):
+                    found.add(faq_id)
+                    break
+        return found
+
     def supported_topics(self, text: str) -> set[int]:
         """Темы, которые подтверждает хотя бы одно различающее слово запроса.
 
@@ -213,18 +225,32 @@ class FuzzySearch:
 
         Сравнение слов — то же нечёткое, что и в поиске, поэтому опечатка
         подтверждение не теряет: «балнс» подтверждает тему 1.
+
+        Поверх этого — правило согласия действия с объектом. Различающие
+        слова делятся на две роли: ДЕЙСТВИЯ (knowledge.is_action) и всё
+        остальное, то есть ОБЪЕКТЫ. Если в запросе есть и то и другое, но
+        ни одна тема не содержит их обоих, запрос описывает операцию,
+        которой в базе нет: «сменить номер» (сменить — тема 5, номер —
+        темы 6, 12, 13), «восстановить тариф», «заблокировать тариф».
+        Подтверждать тему в таком случае не может ничто, и вопрос уходит
+        в отказ с тремя кнопками, а не в тему ближайшего по буквам глагола.
+
+        Если роль в запросе одна («перевести деньги» — только действие,
+        «остаток минут» — только объекты), правило не применяется: сверять
+        не с чем, и подтверждение работает как раньше.
         """
         terms = distinctive_terms(text)
         if not terms:
             return set()
-        supported: set[int] = set()
-        for faq_id, words in self.topic_tokens.items():
-            for term in terms:
-                if any(token_similarity(variant, word) >= PAIR_THRESHOLD
-                       for variant in term for word in words):
-                    supported.add(faq_id)
-                    break
-        return supported
+        actions = [term for term in terms if is_action(term)]
+        objects = [term for term in terms if not is_action(term)]
+        if not actions or not objects:
+            return self._topics_with_any(terms)
+        by_action = self._topics_with_any(actions)
+        by_object = self._topics_with_any(objects)
+        if by_action and by_object and not (by_action & by_object):
+            return set()
+        return by_action | by_object
 
     def search(self, text: str, limit: int = 3) -> list[Match]:
         """Кандидаты по убыванию score; пустой запрос даёт пустой список."""

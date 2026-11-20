@@ -514,29 +514,137 @@ def another_question_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
     return Screen(text, ((_menu_button(), _operator_button()),))
 
 
+#: Часы работы в ответе темы 14 записаны временем: «09:00–18:00».
+CLOCK_RE = re.compile(r"\d{1,2}[:.]\d{2}")
+
+#: Граница предложения в ответе из faq.json.
+SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+
+#: Глаголы инструкции «напишите „оператор“» на обоих языках. Сравнение
+#: идёт по сглаженной форме, поэтому «жазы» ловит «жазыңыз».
+INSTRUCTION_VERBS: tuple[str, ...] = ("напиш", "жазы", "write")
+
+
+def _sentences(text: str) -> list[str]:
+    """Ответ из базы по предложениям, без пустых."""
+    return [part.strip() for part in SENTENCE_RE.split(text or "")
+            if part.strip()]
+
+
+def _is_self_instruction(sentence: str) -> bool:
+    """Предложение вида «Напишите „оператор“ в боте»?
+
+    Такое предложение объясняет, как ПОПРОСИТЬ оператора. Человеку,
+    который уже попросил, оно бессмысленно, поэтому в подтверждении
+    передачи его не цитируем.
+    """
+    folded = fold(sentence)
+    if not any(verb in folded for verb in INSTRUCTION_VERBS):
+        return False
+    return any(fold(word) in folded
+               for word in rules().operator.direct_words if fold(word))
+
+
+def operator_facts(entry: FaqEntry | None,
+                   language: str = config.DEFAULT_LANGUAGE) -> str:
+    """Фактическая часть темы про поддержку: часы работы.
+
+    Ответ темы 14 написан как ответ на вопрос «как связаться с
+    поддержкой» и состоит из двух частей: инструкции («напишите
+    „оператор“ в боте») и факта («работает ежедневно 09:00–18:00»).
+    В подтверждении передачи нужен только факт.
+
+    Факт разбирается из `faq.json`, а не переписан руками: берём те
+    предложения ответа, в которых есть время. Если в базе времени нет
+    вовсе, остаётся всё, кроме самой инструкции, — так правка ответа в
+    `faq.json` не превращается в молчание бота.
+    """
+    if entry is None:
+        return ""
+    sentences = _sentences(entry.answer(language))
+    hours = [item for item in sentences if CLOCK_RE.search(item)]
+    if hours:
+        return " ".join(hours)
+    return " ".join(item for item in sentences
+                    if not _is_self_instruction(item))
+
+
 def operator_screen(entry: FaqEntry | None,
                     language: str = config.DEFAULT_LANGUAGE,
                     reason: str | None = None,
                     note: str | None = None) -> Screen:
-    """Передача оператору: условия берём из faq.json, ничего не выдумываем.
+    """Передача оператору либо ответ на вопрос «как связаться с поддержкой».
 
     `reason` — код причины из конфига: видно и абоненту, и в /stats.
     `note` — имя сообщения из конфига, которое объясняет передачу своими
     словами («больше советов по этой теме у меня нет»).
+
+    Причина меняет смысл экрана, и это исправление живого теста. На слово
+    «оператор» бот отвечал цитатой темы 14 целиком — то есть инструкцией
+    «напишите „оператор“ в боте» человеку, который её только что
+    выполнил. Поэтому:
+
+    * **причина задана** (прямая просьба, жалоба, «совет не помог») —
+      экран подтверждает передачу и оставляет из `faq.json` только факт:
+      часы работы поддержки (:func:`operator_facts`);
+    * **причины нет** — абонент СПРОСИЛ, как связаться с поддержкой, и
+      тема 14 пришла обычным путём. Инструкция из базы здесь уместна и
+      печатается целиком.
+
+    Своих фактов экран не придумывает ни в том, ни в другом случае:
+    часы работы разбираются из ответа темы, а не записаны в коде.
     """
     lines = ["🧑‍💼 <b>Оператор</b>"]
     if reason:
         lines.append(f"<i>{_esc(reason_label(reason, language))}</i>")
     if note:
         lines.append(_esc(message(note, language)))
-    if entry is not None:
-        lines.append("")
-        lines.append(_esc(entry.answer(language)))
-    note = _t(language, "обращение помечено для оператора",
-              "кайрылууңуз операторго белгиленди")
+
     lines.append("")
-    lines.append(f"<i>{_esc(note)}</i>")
+    if reason:
+        lines.append(_esc(message("operator_handoff", language)))
+        facts = operator_facts(entry, language)
+        if facts:
+            lines.append(_esc(facts))
+    elif entry is not None:
+        lines.append(_esc(entry.answer(language)))
     return Screen("\n".join(lines), ((_menu_button(),),))
+
+
+def with_ticket_note(screen: Screen, ticket: str,
+                     language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """Дописать к экрану номер обращения: оператор его уже получил.
+
+    Строка появляется только после того, как карточка обращения
+    действительно ушла в операторский чат. Обещать ответ человека до
+    этого нельзя: `OPERATOR_CHAT_ID` может быть не задан, а Telegram —
+    не принять сообщение.
+    """
+    note = message("operator_queued", language)
+    text = (f"{screen.text}\n\n🎫 <code>{_esc(ticket)}</code>\n"
+            f"<i>{_esc(note)}</i>")
+    return Screen(text, screen.rows, screen.parse_mode)
+
+
+#: До какой длины везём ответ оператора абоненту. У сообщения Telegram
+#: предел 4096 знаков вместе с разметкой — оставляем запас.
+OPERATOR_REPLY_LENGTH: int = 3000
+
+
+def operator_answer_screen(text: str,
+                           language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """Ответ живого оператора в чате абонента, с явной пометкой.
+
+    Пометка обязательна: иначе абонент не отличит слова человека от
+    ответа из базы, а это разные обещания. Текст оператора печатается
+    как есть (с экранированием), бот его не правит и не переводит.
+    """
+    body = (text or "").strip()
+    if len(body) > OPERATOR_REPLY_LENGTH:
+        body = body[:OPERATOR_REPLY_LENGTH].rstrip() + "…"
+    title = message("operator_reply", language)
+    return Screen(f"<b>{_esc(title)}</b>\n\n{_esc(body)}",
+                  ((_menu_button(),),))
 
 
 def help_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
@@ -771,6 +879,39 @@ DEFAULT_RULES: Mapping[str, Any] = {
                   "обращение я помечаю для человека.",
             "ky": "Мындай кайрылууларды оператор чечет. Жогоруда көрсөтмө "
                   "бар, кайрылууңузду адамга белгиледим.",
+        },
+        "operator_handoff": {
+            "ru": "Обращение принято и помечено для оператора.",
+            "ky": "Кайрылуу кабыл алынды жана операторго белгиленди.",
+        },
+        "operator_queued": {
+            "ru": "Оператор уже видит обращение — ответ придёт в этот же чат.",
+            "ky": "Оператор кайрылууну көрүп турат — жооп ушул чатка келет.",
+        },
+        "operator_reply": {
+            "ru": "🧑‍💼 Ответ оператора",
+            "ky": "🧑‍💼 Оператордун жообу",
+        },
+        "operator_card_hint": {
+            "ru": "Ответьте реплаем на это сообщение — бот передаст текст "
+                  "абоненту.",
+            "ky": "Бул билдирүүгө реплай менен жооп бериңиз — бот текстти "
+                  "абонентке жеткирет.",
+        },
+        "operator_unknown": {
+            "ru": "Не нахожу обращение для этого сообщения: бот "
+                  "перезапускался. Попросите абонента написать снова.",
+            "ky": "Бул билдирүүгө тиешелүү кайрылууну таппадым: бот кайра "
+                  "жүктөлгөн. Абонентти кайра жазууга өтүнүңүз.",
+        },
+        "operator_delivered": {
+            "ru": "✅ Ответ доставлен абоненту.",
+            "ky": "✅ Жооп абонентке жеткирилди.",
+        },
+        "operator_failed": {
+            "ru": "Не удалось доставить ответ: абонент мог остановить бота.",
+            "ky": "Жоопту жеткире албадым: абонент ботту токтоткон болушу "
+                  "мүмкүн.",
         },
         "language_switched": {
             "ru": "Готово, отвечаю по-русски. Переключить обратно можно "

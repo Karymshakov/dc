@@ -65,7 +65,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import config, presentation
+from . import config, handoff, presentation
 from .answer import (
     MEMORY,
     STATS,
@@ -1313,12 +1313,86 @@ def build_application(token: str) -> Any:
     application.add_handler(MessageHandler(filters.VOICE, _on_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
                                            _on_text))
+    application.add_error_handler(_on_error)
     return application
+
+
+CONFLICT_HINT = (
+    "\nЗапущен ещё один экземпляр бота — Telegram отдаёт очередь сообщений\n"
+    "только одному. Остановите лишние:\n"
+    "    python tools/run_bot.py --stop\n"
+    "и запустите заново:\n"
+    "    python tools/run_bot.py\n"
+)
+
+
+async def _on_error(update: Any, context: Any) -> None:
+    """Единая обработка сбоев: без трассировки в лицо и с внятной причиной.
+
+    Без обработчика библиотека на каждую ошибку печатает «No error handlers
+    are registered» и полный трейсбек. На защите это выглядит как падение,
+    хотя чаще всего причина бытовая — второй запущенный экземпляр.
+    """
+    error = getattr(context, "error", None)
+
+    # Конфликт очереди — самая частая и самая безобидная ошибка.
+    # Она повторяется каждые несколько секунд, поэтому печатаем подсказку
+    # один раз, дальше только короткая строка в лог.
+    if type(error).__name__ == "Conflict":
+        if not getattr(_on_error, "_conflict_reported", False):
+            print(CONFLICT_HINT)
+            _on_error._conflict_reported = True        # type: ignore[attr-defined]
+        logger.warning("конфликт очереди: работает другой экземпляр бота")
+        return
+
+    if type(error).__name__ in ("NetworkError", "TimedOut"):
+        logger.warning("сеть недоступна, попробуем ещё раз: %s", error)
+        return
+
+    logger.exception("необработанный сбой", exc_info=error)
+
+    # Абонент не должен остаться без ответа из-за нашей ошибки.
+    chat = getattr(getattr(update, "effective_chat", None), "id", None)
+    if chat is None:
+        return
+    try:
+        language = chat_language(chat)
+        await context.bot.send_message(
+            chat_id=chat,
+            text=presentation.message("service_unavailable", language),
+        )
+    except Exception:                                   # noqa: BLE001
+        logger.warning("не удалось сообщить абоненту о сбое")
+
+
+def token_from_env_file(name: str = TOKEN_ENV) -> str:
+    """Значение из файла `.env` в корне проекта.
+
+    Переменная окружения остаётся главной, но держать её в сессии
+    терминала неудобно: она теряется при каждом новом окне, и человек
+    запускает бота без токена снова и снова. Файл `.env` исключён из
+    git (см. `.gitignore`), поэтому секрет в репозиторий не попадает.
+    """
+    env_file = Path(__file__).resolve().parents[1] / ".env"
+    if not env_file.exists():
+        return ""
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == name:
+            return value.strip().strip('"').strip("'")
+    return ""
 
 
 def run(token: str | None = None) -> int:
     """Запустить бота. Возвращает код выхода, исключений наружу не бросает."""
-    token = (token or os.environ.get(TOKEN_ENV) or "").strip()
+    token = (token or os.environ.get(TOKEN_ENV) or token_from_env_file()).strip()
     if not token:
         print(NO_TOKEN_MESSAGE)
         return 2
