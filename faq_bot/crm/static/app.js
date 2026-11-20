@@ -95,10 +95,11 @@ const REASONS = {
   not_helping: "Совет не помог", manual: "Перехвачен оператором",
 };
 
-function hue(text) {
-  let x = 0;
-  for (const ch of String(text)) x = (x * 31 + ch.codePointAt(0)) % 360;
-  return x;
+/* Тексты бота в Telegram украшены эмодзи-светофором. В рабочем месте
+ * оператора это шум: тему и уверенность и так показывают метки. */
+const PICTO = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\uFE0F\u200D\u20E3]/gu;
+function plain(text) {
+  return String(text || "").replace(PICTO, "").split("\n").map((line) => line.replace(/^[ \t]+/, "").replace(/ {2,}/g, " ")).join("\n").trim();
 }
 
 function initials(name) {
@@ -114,7 +115,6 @@ function displayName(conv) {
 
 function avatar(conv, cls = "") {
   const el = h("span", { class: "avatar " + cls, text: initials(displayName(conv)) });
-  el.style.setProperty("--h", hue(conv.chat_id));
   if (conv.status) el.append(h("i", { class: "st " + conv.status }));
   return el;
 }
@@ -369,7 +369,8 @@ function convItem(conv) {
     h("span", { class: "conv-name", text: name }),
     h("span", { class: "lang " + conv.lang, text: LANG[conv.lang] || conv.lang }));
   const prefix = { bot: "Бот: ", op: (conv.operator || "Оператор") + ": ", sys: "" }[conv.last_dir] || "";
-  const last = h("span", { class: "conv-last" }, prefix ? h("b", { text: prefix }) : null, conv.last_text || "—");
+  const preview = conv.last_dir === "in" ? conv.last_text : plain(conv.last_text).replace(/\s+/g, " ");
+  const last = h("span", { class: "conv-last" }, prefix ? h("b", { text: prefix }) : null, preview || "—");
   const side = h("span", { class: "conv-side" });
   if (conv.waiting_since) {
     const since = now() - conv.waiting_since;
@@ -477,7 +478,7 @@ function renderChatHead() {
 
   const status = $("#chat-status");
   const pills = [];
-  if (conv.status === "operator") pills.push(h("span", { class: "pill operator" }, icon("user"), "Ведёт " + (conv.operator === S.me ? "вы" : conv.operator)));
+  if (conv.status === "operator") pills.push(h("span", { class: "pill operator" }, icon("user"), (conv.operator === S.me ? "Ведёте вы" : "Ведёт " + conv.operator)));
   else if (conv.status === "waiting") pills.push(h("span", { class: "pill waiting" }, icon("hand"), "Ждёт оператора"));
   else pills.push(h("span", { class: "pill bot" }, icon("bot"), "Ведёт бот"));
   if (conv.reason) pills.push(h("span", { text: REASONS[conv.reason] || conv.reason }));
@@ -561,9 +562,9 @@ function messageNode(m, prev, conv) {
     else if (m.dir === "bot") row.append(h("div", { class: "who" }, icon("bot"), "Бот"));
     else row.append(h("div", { class: "who" }, icon("user"), m.author || "Оператор"));
   }
-  const bubble = h("div", { class: "bubble" + (m.dir === "in" && m.unanswered && !m.tag ? " missed" : ""), text: m.text });
+  const bubble = h("div", { class: "bubble" + (m.dir === "in" && m.unanswered && !m.tag ? " missed" : ""), text: m.dir === "bot" ? plain(m.text) : m.text });
   if (m.dir === "bot" && m.buttons && m.buttons.length) {
-    bubble.append(h("div", { class: "btns" }, m.buttons.slice(0, 8).map(([label]) => h("span", { text: label }))));
+    bubble.append(h("div", { class: "btns" }, m.buttons.slice(0, 8).map(([label]) => h("span", { text: plain(label) }))));
   }
   row.append(bubble);
 
@@ -576,7 +577,7 @@ function messageNode(m, prev, conv) {
     else if (m.tag) meta.append(h("span", { class: "tagchip done" }, icon("check"), "Тема " + m.tag));
     else if (m.unanswered) {
       meta.append(h("span", { class: "tagchip miss", text: "бот не понял" }));
-      meta.append(h("button", { class: "tagchip teach", dataset: { teach: m.id } }, icon("spark"), "Научить"));
+      meta.append(h("button", { class: "tagchip teach", dataset: { teach: m.id } }, "Научить"));
     } else if (m.faq_id) {
       meta.append(h("span", { class: "tagchip topic", text: "Тема " + m.faq_id }));
     }
@@ -926,7 +927,6 @@ async function loadAnalytics() {
 
   $("#chart-ops").replaceChildren(...(a.operators.length ? a.operators.map((row) => {
     const av = h("span", { class: "avatar", text: initials(row.name) });
-    av.style.setProperty("--h", hue(row.name));
     return h("div", { class: "op-row" }, av, h("span", { text: row.name }), h("b", { text: row.n + " отв." }),
       h("span", { class: "muted", text: row.avg_wait != null ? "≈ " + duration(row.avg_wait) : "" }));
   }) : [h("div", { class: "empty", text: "Операторы ещё не отвечали" })]));
@@ -993,9 +993,9 @@ async function renderDemo() {
       return;
     }
     if (m.dir === "in") { nodes.push(h("div", { class: "d-msg me", text: m.text })); return; }
-    nodes.push(h("div", { class: "d-msg them" + (m.dir === "op" ? " op" : "") }, h("small", { text: m.dir === "op" ? "🧑‍💼 " + (m.author || "Оператор") : "INAI Mobile" }), m.text));
+    nodes.push(h("div", { class: "d-msg them" + (m.dir === "op" ? " op" : "") }, h("small", { text: m.dir === "op" ? (m.author || "Оператор") : "INAI Mobile" }), m.dir === "bot" ? plain(m.text) : m.text));
     if (m.dir === "bot" && m.buttons && m.buttons.length && index === last) {
-      nodes.push(h("div", { class: "d-btns" }, m.buttons.map(([label, action]) => h("button", { onclick: () => demoAction(action) }, label))));
+      nodes.push(h("div", { class: "d-btns" }, m.buttons.map(([label, action]) => h("button", { onclick: () => demoAction(action) }, plain(label)))));
     }
   });
   if (!nodes.length) nodes.push(h("div", { class: "d-sys", text: "Напишите боту — как абонент в Telegram." }));
