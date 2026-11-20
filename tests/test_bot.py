@@ -2243,3 +2243,133 @@ def test_repeated_question_costs_nothing(model):
     _Dialog(9107).says("скока денег на счету")
 
     assert len(fake.calls) == 1, "за повтор вопроса заплатили дважды"
+
+
+# --------------------------------------------------------------------------
+# Развод каналов: CRM и чат операторов не ведут одно обращение вдвоём
+# --------------------------------------------------------------------------
+#
+# Дефект нашёлся при сборке CRM сокомандника с ботом. Просьба «оператор»
+# ставила обращение И в очередь CRM, И полной карточкой в группу Telegram.
+# Два человека, не видящие друг друга, могли написать абоненту разное.
+# Второе: карточка выносит вопрос абонента дословно в групповой чат
+# вместе с тем, что он написал сам — номером, адресом почты.
+
+
+class _FakeHub:
+    """CRM в объёме, который нужен боту: журнал и очередь."""
+
+    def __init__(self, human: bool = False) -> None:
+        self.requested: list[tuple[object, str]] = []
+        self.messages: list[str] = []
+        self._human = human
+
+    def request_operator(self, chat_id: object, reason: str) -> None:
+        self.requested.append((chat_id, reason))
+
+    def client_message(self, chat_id: object, text: str, **kwargs: object) -> None:
+        self.messages.append(text)
+
+    def is_human(self, chat_id: object) -> bool:
+        return self._human
+
+    def bot_reply(self, chat_id: object, text: str, **kwargs: object) -> None:
+        pass
+
+
+@pytest.fixture
+def crm(monkeypatch):
+    """Подключить CRM на время теста и снять после."""
+    hub = _FakeHub()
+    monkeypatch.setattr(bot, "CRM", hub)
+    return hub
+
+
+SECRET = "баланс не тот, мой номер 0700112233"
+
+
+def test_crm_takes_the_queue_and_the_group_gets_no_question(monkeypatch, crm):
+    """С подключённой CRM в группу уходит уведомление без текста вопроса."""
+    pytest.importorskip("telegram")
+    _operator_chat(monkeypatch)
+    context = _FakeContext()
+
+    _Dialog(9200, context=context).says(SECRET).says("оператор")
+
+    assert crm.requested, "обращение не попало в очередь CRM"
+    posted = context.bot.to(str(OPERATOR_CHAT))
+    assert len(posted) == 1
+    assert "0700112233" not in posted[0].text, "номер абонента ушёл в группу"
+    assert SECRET not in posted[0].text
+    assert "CRM" in posted[0].text
+
+
+def test_a_reply_to_the_notice_does_not_reach_the_subscriber(monkeypatch, crm):
+    """Отвечать можно только из CRM: реплай на уведомление не доставляется.
+
+    Связь «сообщение → обращение» при ведущей CRM намеренно не создаётся,
+    поэтому реплай в группе остаётся репликой в группе.
+    """
+    pytest.importorskip("telegram")
+    _operator_chat(monkeypatch)
+    context = _FakeContext()
+    _Dialog(9201, context=context).says("оператор")
+    notice = context.bot.to(str(OPERATOR_CHAT))[0]
+    before = len(context.bot.posted)
+
+    _operator_says("наберите *100#", reply_to=notice.message_id,
+                   context=context)
+
+    assert len(context.bot.posted) == before, "ответ ушёл в обход CRM"
+
+
+def test_without_crm_the_group_gets_the_full_card(monkeypatch):
+    """Без CRM поведение прежнее: полная карточка и ответ реплаем."""
+    pytest.importorskip("telegram")
+    _operator_chat(monkeypatch)
+    context = _FakeContext()
+
+    _Dialog(9202, context=context).says(SECRET).says("оператор")
+
+    posted = context.bot.to(str(OPERATOR_CHAT))
+    assert "0700112233" in posted[0].text, "оператору не видно, с чем пришли"
+
+
+def test_the_channel_can_be_forced_to_telegram(monkeypatch, crm):
+    """`OPERATOR_CHANNEL=telegram` возвращает прежнее поведение при CRM."""
+    pytest.importorskip("telegram")
+    _operator_chat(monkeypatch)
+    monkeypatch.setenv(bot.OPERATOR_CHANNEL_ENV, "telegram")
+    context = _FakeContext()
+
+    _Dialog(9203, context=context).says(SECRET).says("оператор")
+
+    posted = context.bot.to(str(OPERATOR_CHAT))
+    assert "0700112233" in posted[0].text
+
+
+def test_an_unknown_channel_value_is_auto(monkeypatch):
+    """Опечатка в настройке не меняет поведение молча."""
+    monkeypatch.setenv(bot.OPERATOR_CHANNEL_ENV, "телеграмм")
+
+    assert bot.operator_channel() == "auto"
+
+
+def test_crm_alone_is_enough_to_take_the_request(monkeypatch, crm):
+    """Без OPERATOR_CHAT_ID обращение принимает одна CRM, и этого хватает.
+
+    Номер обращения — понятие карточки в чате операторов: без чата он не
+    тратится (`handoff.DESK.remember` возвращает None). У CRM своя
+    очередь и своя нумерация, поэтому абонент получает подтверждение без
+    номера, а не тишину. Проверяется именно это: запрос дошёл до CRM, в
+    Telegram не ушло ничего, абонент не остался без ответа.
+    """
+    pytest.importorskip("telegram")
+    monkeypatch.delenv(handoff.OPERATOR_CHAT_ENV, raising=False)
+    context = _FakeContext()
+
+    chat = _Dialog(9204, context=context).says("оператор")
+
+    assert crm.requested, "CRM не получила запрос"
+    assert context.bot.posted == [], "ушло в Telegram без настроенного чата"
+    assert "оператор" in chat.last.lower(), "абонент не получил подтверждения"

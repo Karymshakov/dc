@@ -209,6 +209,24 @@ KEYWORDS: dict[int, tuple[str, ...]] = {
     ),
 }
 
+#: Фразы, которым бота научили операторы в CRM (`faq_bot.crm.learning`).
+#:
+#: Пусто, пока CRM не запущена, поэтому `answer()` у жюри работает ровно
+#: на KEYWORDS и воспроизводится с любого клона. Слой меняет только
+#: формулировки, по которым тема находится; ответы по-прежнему берутся
+#: из faq.json, и выдумать факт через обучение нельзя.
+LEARNED: dict[int, tuple[str, ...]] = {}
+
+
+def set_learned(mapping: dict[int, tuple[str, ...]] | None) -> None:
+    """Заменить слой выученных фраз и сбросить кэш базы."""
+    LEARNED.clear()
+    for faq_id, phrases in (mapping or {}).items():
+        cleaned = tuple(phrase for phrase in phrases if phrase.strip())
+        if cleaned:
+            LEARNED[int(faq_id)] = cleaned
+    default_faq.cache_clear()
+
 # --- Поисковая нормализация ------------------------------------------------
 
 #: Свёртка кыргызских букв: «көрөм» и «korom» должны делить n-граммы.
@@ -628,10 +646,17 @@ FIELD_WEIGHTS: dict[str, float] = {
 }
 
 
-def load_faq(path: Path | None = None) -> tuple[FaqEntry, ...]:
-    """Читает faq.json и прикрепляет к каждой теме её ключевые слова."""
+def load_faq(path: Path | None = None,
+             learned: dict[int, tuple[str, ...]] | None = None,
+             ) -> tuple[FaqEntry, ...]:
+    """Читает faq.json и прикрепляет к каждой теме её ключевые слова.
+
+    `learned` подменяет слой выученных фраз: так CRM проверяет новую
+    фразу на копии базы, не трогая рабочую.
+    """
     source = Path(path) if path is not None else config.FAQ_PATH
     raw = json.loads(source.read_text(encoding="utf-8"))
+    extra = LEARNED if learned is None else learned
     entries = [
         FaqEntry(
             id=int(item["id"]),
@@ -639,7 +664,8 @@ def load_faq(path: Path | None = None) -> tuple[FaqEntry, ...]:
             question_ky=str(item.get("question_ky", "")),
             answer_ru=str(item.get("answer_ru", "")),
             answer_ky=str(item.get("answer_ky", "")),
-            keywords=tuple(KEYWORDS.get(int(item["id"]), ())),
+            keywords=tuple(KEYWORDS.get(int(item["id"]), ()))
+                     + tuple(extra.get(int(item["id"]), ())),
         )
         for item in raw
     ]

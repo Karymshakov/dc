@@ -1,0 +1,5 @@
+# answer(), ask и eval работают без единой зависимости.
+# Ниже — то, что нужно для запуска бота и тестов.
+python-telegram-bot>=20     # main.py bot
+pytest>=7                   # python -m pytest -q
+# rapidfuzz                 # необязательно: ускоряет второй метод поиска
