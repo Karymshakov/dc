@@ -7,7 +7,9 @@
 
 Токен берётся из переменной окружения `TELEGRAM_BOT_TOKEN` и в репозиторий
 не попадает. Без токена запуск печатает понятное сообщение и выходит с
-кодом 2, без трассировки стека.
+кодом 2, без трассировки стека. Так же читается `OPERATOR_CHAT_ID` — чат
+живого оператора; без него бот работает полностью, только не пересылает
+обращения.
 
 Вся логика экранов собрана в двух чистых функциях — `screen_for_text()` и
 `screen_for_action()`. Они не знают про Telegram, поэтому поведение кнопок
@@ -40,6 +42,12 @@
   человеческий ответ здесь, до вызова `answer()`. Сама функция
   `answer()` по-прежнему отдаёт на такие реплики `faq_id = null` —
   так требует спецификация, и по ней считается автопроверка.
+* **Передача живому оператору.** Если задана переменная окружения
+  `OPERATOR_CHAT_ID`, обращение уходит карточкой в этот чат Telegram, а
+  реплай оператора на карточку бот доставляет абоненту с пометкой
+  «🧑‍💼 Ответ оператора». Память и текст карточки живут в
+  `faq_bot.handoff`, здесь только отправка. Без переменной всё работает
+  как прежде: обращение помечается, но никуда не пересылается.
 * **Голос.** Голосовое сообщение скачивается, распознаётся в
   `faq_bot.speech` и дальше идёт обычным путём, с эхом услышанного перед
   карточкой. Пределы длины и бюджеты живут в самом `speech`: ключ
@@ -240,6 +248,7 @@ def forget_chat(chat_id: int | str | None) -> None:
     _chat_language_streak.pop(key, None)
     throttle().forget(chat_id)
     conversation().forget(chat_id)
+    handoff.DESK.forget(chat_id)
     reset_context(chat_id)
 
 
@@ -645,6 +654,7 @@ def reset_runtime_state() -> None:
     if _flow is not None:
         _flow.clear()
         _flow = None
+    handoff.DESK.clear()
     reset_context()
 
 
@@ -652,17 +662,46 @@ def reset_runtime_state() -> None:
 # Экраны
 # --------------------------------------------------------------------------
 
+def _record_handoff(chat_id: int | str | None, reason: str, language: str,
+                    reply: Reply | None = None) -> None:
+    """Учесть передачу оператору: агрегат /stats и обращение для человека.
+
+    Одно правило на обе половины: что попало в /stats как переданное
+    оператору, то и уехало в операторский чат. Иначе счётчик причин и
+    очередь живого человека разошлись бы, и объяснить расхождение было
+    бы нечем.
+
+    Обращение только откладывается в памяти (`handoff.DESK`): отправка
+    асинхронная, её делает :func:`_forward_to_operator` уже после того,
+    как абонент увидел экран. Без `OPERATOR_CHAT_ID` откладывать нечего,
+    и всё работает как прежде.
+    """
+    STATS.record_operator(reason, chat_id)
+    MEMORY.forget_misses(chat_id)
+    handoff.DESK.remember(
+        chat_id, reason, language,
+        question=reply.text if reply is not None else "",
+        faq_id=reply.faq_id if reply is not None else None,
+        confidence=reply.confidence if reply is not None else 0.0,
+    )
+
+
 def _operator_screen(chat_id: int | str | None,
                      reason: str | None = None,
                      language: str | None = None,
-                     note: str | None = None) -> Screen:
-    """Экран передачи оператору; причина уходит в агрегат /stats."""
+                     note: str | None = None,
+                     reply: Reply | None = None) -> Screen:
+    """Экран передачи оператору; причина уходит в агрегат /stats.
+
+    `reply` — результат поиска, если он был: по нему оператор увидит, что
+    бот успел ответить, и не начнёт с того же совета. У кнопки
+    «0 Оператор» его нет, и в карточку идёт последний вопрос чата.
+    """
     operator = presentation.rules().operator
     if language not in config.LANGUAGES:
         language = chat_language(chat_id)
     if reason:
-        STATS.record_operator(reason, chat_id)
-        MEMORY.forget_misses(chat_id)
+        _record_handoff(chat_id, reason, language, reply)
     return presentation.operator_screen(entry_by_id(operator.faq_id),
                                         language, reason, note)
 
@@ -728,7 +767,13 @@ def screen_for_text(text: str,
 
     reason = presentation.operator_reason(stripped)
     if reason == "direct_request":
+        # Сама просьба «оператор» вопросом не является: в карточку для
+        # человека идёт последний вопрос этого чата, а не слово «оператор».
         return _operator_screen(chat_id, reason, language)
+
+    # Вопрос запоминаем до разбора: если абонент после него нажмёт
+    # «0 Оператор», человеку по ту сторону нужно видеть, с чем пришли.
+    handoff.DESK.note_question(chat_id, stripped)
 
     intent = presentation.detect_intent(stripped)
     if intent is not None:
@@ -745,6 +790,10 @@ def screen_for_text(text: str,
 
     reply = respond(stripped, chat_id=chat_id, language=language)
     set_chat_language(chat_id, reply.lang)
+    # Что бот ответил на этот вопрос — пригодится карточке обращения,
+    # если следом абонент попросит человека: оператор увидит не только
+    # вопрос, но и совет, который уже не сработал.
+    handoff.DESK.note_answer(chat_id, reply.faq_id, reply.confidence)
     screen = presentation.answer_card(reply)
 
     if reason is not None:
@@ -754,8 +803,8 @@ def screen_for_text(text: str,
         # вместо человека была бы формальной отпиской, человек вместо
         # инструкции — потерей готового ответа.
         if reply.faq_id is None:
-            return _operator_screen(chat_id, reason, reply.lang)
-        STATS.record_operator(reason, chat_id)
+            return _operator_screen(chat_id, reason, reply.lang, reply=reply)
+        _record_handoff(chat_id, reason, reply.lang, reply)
         conversation().serve(chat_id, reply.faq_id)
         return presentation.with_operator_offer(screen, reply.lang, reason,
                                                 "escalated")
@@ -766,22 +815,22 @@ def screen_for_text(text: str,
             return _refusal_screen(refused, reply, chat_id, reply.lang)
 
     if reply.faq_id is None:
-        screen = _maybe_offer_operator(screen, chat_id, reply.lang)
+        screen = _maybe_offer_operator(screen, chat_id, reply)
     conversation().serve(chat_id, reply.faq_id)
     return screen
 
 
 def _maybe_offer_operator(screen: Screen, chat_id: int | str | None,
-                          language: str) -> Screen:
+                          reply: Reply) -> Screen:
     """После нескольких отказов подряд предложить оператора самому."""
     threshold = presentation.rules().operator.repeated_miss_threshold
     if MEMORY.misses(chat_id) < threshold:
         return screen
-    MEMORY.forget_misses(chat_id)
-    STATS.record_operator("repeated_miss", chat_id)
+    _record_handoff(chat_id, "repeated_miss", reply.lang, reply)
     logger.info("чат %s не понят %d раза подряд, предлагаю оператора",
                 chat_id, threshold)
-    return presentation.with_operator_offer(screen, language, "repeated_miss")
+    return presentation.with_operator_offer(screen, reply.lang,
+                                            "repeated_miss")
 
 
 # --------------------------------------------------------------------------
@@ -878,7 +927,7 @@ def _refusal_screen(refused: tuple[str, int], reply: Reply,
     if count >= flow.escalate_after:
         flow.satisfied(chat_id)
         return _operator_screen(chat_id, "not_helping", language,
-                                note="no_more_advice")
+                                note="no_more_advice", reply=reply)
 
     return presentation.alternatives_screen(
         _alternatives(reply.text, reply, chat_id, topic), language,
@@ -1097,6 +1146,146 @@ async def _rewrite(sent: Any, screen: Screen) -> str:
     return await _apply(editor, screen)
 
 
+# --------------------------------------------------------------------------
+# Передача оператору: карточка в его чат и реплай обратно абоненту
+# --------------------------------------------------------------------------
+
+async def _push(context: Any, chat_id: int | str, screen: Screen) -> Any:
+    """Отправить экран в чат, который сам нам не писал.
+
+    Обычные ответы уходят через `message.reply_text()`, но карточка
+    обращения и ответ оператора адресуются другому чату, поэтому здесь
+    нужен сам клиент Telegram. Если его нет (вызов из теста без
+    контекста), исключение ловит вызывающий — молча ронять бот нельзя.
+    """
+    client = getattr(context, "bot", None)
+    if client is None:
+        raise RuntimeError("нет клиента Telegram: отправлять нечем")
+    return await client.send_message(
+        chat_id=handoff.chat_address(str(chat_id)),
+        text=screen.text,
+        parse_mode=screen.parse_mode,
+        reply_markup=_markup(screen),
+        disable_web_page_preview=True,
+    )
+
+
+async def _forward_to_operator(context: Any,
+                               chat_id: int | str | None,
+                               ) -> handoff.Ticket | None:
+    """Отдать отложенное обращение в операторский чат.
+
+    Возвращает обращение, если карточка действительно ушла человеку:
+    только тогда абоненту можно обещать ответ. `None` означает
+    «пересылать нечего или некуда», и это штатный режим работы без
+    `OPERATOR_CHAT_ID` — ни падений, ни сообщений об ошибке.
+
+    Исключения ловятся все до одного: чат оператора мог быть указан с
+    опечаткой, бота могли выгнать из группы, сеть могла отвалиться.
+    Абонент при этом уже получил ответ бота, и терять его из-за
+    недоступного оператора нельзя.
+    """
+    ticket = handoff.DESK.take(chat_id)
+    if ticket is None:
+        return None
+    target = handoff.operator_chat()
+    if not target or getattr(context, "bot", None) is None:
+        return None
+    try:
+        sent = await _push(context, target, handoff.card(ticket))
+    except Exception:                                   # noqa: BLE001
+        logger.exception("карточка обращения %s не ушла оператору",
+                         ticket.number)
+        return None
+    handoff.DESK.bind(getattr(sent, "message_id", None), ticket)
+    logger.info("обращение %s (%s) передано в чат оператора",
+                ticket.number, ticket.reason)
+    return ticket
+
+
+async def _note_handoff(context: Any, chat_id: int | str | None,
+                        screen: Screen, handle: Any) -> None:
+    """Передать обращение человеку и дописать номер в ответ абоненту.
+
+    Строка «оператор уже видит обращение» появляется правкой того же
+    сообщения, а не вторым сообщением в чат. Две причины. Обещание
+    имеет смысл только после того, как карточка действительно ушла, —
+    до отправки его давать нельзя. И новых сообщений этот бот не плодит
+    принципиально: именно от них чат превращался в простыню.
+    """
+    ticket = await _forward_to_operator(context, chat_id)
+    if ticket is None:
+        return
+    noted = presentation.with_ticket_note(screen, ticket.number, ticket.lang)
+    await _rewrite(handle, noted)
+
+
+def _from_operator_chat(update: Any) -> bool:
+    """Пришло ли обновление из операторского чата."""
+    chat = getattr(update, "effective_chat", None)
+    if chat is None:                                    # pragma: no cover
+        return False
+    return handoff.is_operator_chat(getattr(chat, "id", None),
+                                    getattr(chat, "username", None))
+
+
+async def _on_operator_message(update: Any, context: Any) -> None:
+    """Сообщение из операторского чата: реплай доставляется абоненту.
+
+    Обычный путь поиска для этого чата закрыт: оператор пишет абоненту,
+    а не боту, и карточка обращения не должна превращаться в вопрос к
+    базе знаний.
+
+    Разбираются ровно реплаи на карточку обращения. Остальное —
+    переписка людей между собой, и бот в неё не вмешивается:
+
+    * сообщение без реплая — коллеги обсуждают смену, бот молчит;
+    * реплай без текста (голосовое, файл, стикер) не обрабатывается:
+      доставить абоненту нечего, а гадать за оператора нельзя;
+    * реплай на карточку, которой бот не помнит, получает внятный
+      ответ. Связь «карточка ↔ чат абонента» живёт в памяти процесса
+      (базы данных в задаче нет), поэтому после перезапуска бота старые
+      карточки неизвестны. Молчать здесь нельзя: оператор решит, что
+      абонент получил ответ.
+    """
+    message = update.effective_message
+    if message is None:                                 # pragma: no cover
+        return
+    language = config.DEFAULT_LANGUAGE
+    replied_to = getattr(message, "reply_to_message", None)
+    if replied_to is None:
+        logger.debug("операторский чат: сообщение без реплая, пропускаю")
+        return
+
+    text = (getattr(message, "text", None) or "").strip()
+    if not text:
+        logger.info("операторский чат: реплай без текста, пропускаю")
+        return
+
+    ticket = handoff.DESK.find(getattr(replied_to, "message_id", None))
+    if ticket is None:
+        await _send(message, handoff.notice("operator_unknown", language))
+        return
+
+    screen = presentation.operator_answer_screen(text, ticket.lang)
+    try:
+        await _push(context, ticket.chat_id, screen)
+    except Exception:                                   # noqa: BLE001
+        logger.exception("ответ оператора по обращению %s не доставлен",
+                         ticket.number)
+        await _send(message, handoff.notice("operator_failed", language,
+                                            ticket))
+        return
+
+    # В чате абонента появилось сообщение не от бота: прежний ответ
+    # дозревать больше не может, иначе правка уедет под слова оператора.
+    conversation().close(ticket.chat_id)
+    logger.info("ответ оператора по обращению %s доставлен абоненту",
+                ticket.number)
+    await _send(message, handoff.notice("operator_delivered", language,
+                                        ticket))
+
+
 async def _on_start(update: Any, context: Any) -> None:
     """/start — USSD-меню. Экрана выбора языка нет намеренно."""
     chat_id = update.effective_chat.id
@@ -1139,6 +1328,11 @@ async def _on_text(update: Any, context: Any) -> None:
     """
     message = update.effective_message
     chat_id = update.effective_chat.id
+    if _from_operator_chat(update):
+        # Операторский чат разбирает свой обработчик. Проверка здесь —
+        # вторая линия: порядок обработчиков в приложении менять легко,
+        # а превратить реплай оператора в вопрос к базе нельзя.
+        return
     text = message.text or ""
     flow = conversation()
 
@@ -1150,10 +1344,13 @@ async def _on_text(update: Any, context: Any) -> None:
         screen = presentation.with_revision_note(screen,
                                                  chat_language(chat_id))
         if await _rewrite(flow.handle(chat_id), screen) != "failed":
+            await _note_handoff(context, chat_id, screen,
+                                flow.handle(chat_id))
             return
         # Переписать нечего (сообщение удалили). Молчать нельзя: отвечаем
         # новым сообщением по тому же склеенному тексту.
         flow.rebind(chat_id, await _send(message, screen))
+        await _note_handoff(context, chat_id, screen, flow.handle(chat_id))
         return
 
     screen = screen_for_text(text, chat_id)
@@ -1161,6 +1358,7 @@ async def _on_text(update: Any, context: Any) -> None:
         flow.close(chat_id)
         return
     flow.opened(chat_id, text, await _send(message, screen))
+    await _note_handoff(context, chat_id, screen, flow.handle(chat_id))
 
 
 #: Какое уведомление показать на каждый неудачный статус распознавания.
@@ -1234,6 +1432,11 @@ async def _on_voice(update: Any, context: Any) -> None:
     """
     message = update.effective_message
     chat_id = update.effective_chat.id
+    if _from_operator_chat(update):
+        # Голосовые от оператора не обрабатываем: доставить абоненту
+        # нечего, а распознавание — деньги владельца ключа.
+        logger.info("операторский чат: голосовое пропущено")
+        return
     language = chat_language(chat_id)
     conversation().close(chat_id)
 
@@ -1293,9 +1496,42 @@ async def _on_button(update: Any, context: Any) -> None:
     screen = screen_for_action(query.data or "", chat_id)
     await _edit(query, screen)
 
+    # Кнопка «0 Оператор» — такая же передача человеку, как слово
+    # «оператор». Номер обращения дописывается в то же сообщение.
+    ticket = await _forward_to_operator(context, chat_id)
+    if ticket is not None:
+        await _edit(query, presentation.with_ticket_note(
+            screen, ticket.number, ticket.lang))
+
+
+def _operator_chat_filter() -> Any | None:
+    """Фильтр «сообщение из операторского чата» или `None`, если его нет.
+
+    В переменную окружения человек может положить и числовой id чата
+    (обычный случай, у групп он отрицательный), и `@имя` канала.
+    Команды из фильтра исключены: `/stats` оператору тоже нужен.
+    """
+    from telegram.ext import filters
+
+    target = handoff.operator_chat()
+    if not target:
+        return None
+    try:
+        chat = filters.Chat(chat_id=int(target))
+    except ValueError:
+        chat = filters.Chat(username=target.lstrip("@"))
+    return chat & ~filters.COMMAND
+
 
 def build_application(token: str) -> Any:
-    """Собрать приложение Telegram. Библиотека импортируется здесь."""
+    """Собрать приложение Telegram. Библиотека импортируется здесь.
+
+    Порядок обработчиков значим: Telegram-библиотека отдаёт обновление
+    первому подошедшему. Команды идут первыми, поэтому работают в любом
+    чате. Дальше — операторский чат: всё, что пишут там, разбирает
+    :func:`_on_operator_message`, и обычный путь поиска это не видит.
+    Голос и текст абонентов идут последними.
+    """
     from telegram.ext import (
         ApplicationBuilder,
         CallbackQueryHandler,
@@ -1310,6 +1546,10 @@ def build_application(token: str) -> Any:
     application.add_handler(CommandHandler("stats", _on_stats))
     application.add_handler(CommandHandler("reset", _on_reset))
     application.add_handler(CallbackQueryHandler(_on_button))
+    operator_chat = _operator_chat_filter()
+    if operator_chat is not None:
+        application.add_handler(MessageHandler(operator_chat,
+                                               _on_operator_message))
     application.add_handler(MessageHandler(filters.VOICE, _on_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
                                            _on_text))
@@ -1372,22 +1612,11 @@ def token_from_env_file(name: str = TOKEN_ENV) -> str:
     терминала неудобно: она теряется при каждом новом окне, и человек
     запускает бота без токена снова и снова. Файл `.env` исключён из
     git (см. `.gitignore`), поэтому секрет в репозиторий не попадает.
+
+    Сам разбор файла живёт в `handoff.from_env_file()`: `OPERATOR_CHAT_ID`
+    читается ровно так же, и двух копий одного чтения быть не должно.
     """
-    env_file = Path(__file__).resolve().parents[1] / ".env"
-    if not env_file.exists():
-        return ""
-    try:
-        lines = env_file.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return ""
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition("=")
-        if key.strip() == name:
-            return value.strip().strip('"').strip("'")
-    return ""
+    return handoff.from_env_file(name)
 
 
 def run(token: str | None = None) -> int:
@@ -1428,6 +1657,14 @@ def run(token: str | None = None) -> int:
                 "оператор после %d отказов",
                 rules.refusal.repeat_window_seconds,
                 rules.refusal.escalate_after)
+    if handoff.enabled():
+        # Сам адрес в лог не пишем: это чужой чат, а лог сохраняют.
+        logger.info("обращения уходят живому оператору: задан %s, "
+                    "ответ оператора реплаем на карточку",
+                    handoff.OPERATOR_CHAT_ENV)
+    else:
+        logger.info("%s не задан: обращения помечаются, но никуда не "
+                    "пересылаются", handoff.OPERATOR_CHAT_ENV)
     print("Бот запущен. Остановить — Ctrl+C.")
     try:
         application.run_polling()

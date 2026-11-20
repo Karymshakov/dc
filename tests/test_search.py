@@ -16,7 +16,13 @@ import pytest
 from faq_bot import config
 from faq_bot.contracts import Match, SearchMethod
 from faq_bot.knowledge import default_faq
-from faq_bot.search_fuzzy import BACKEND, FuzzySearch, token_similarity
+from faq_bot.search_fuzzy import (
+    BACKEND,
+    STEM_LENGTH,
+    FuzzySearch,
+    shares_stem,
+    token_similarity,
+)
 from faq_bot.search_tfidf import TfidfSearch, char_ngrams
 
 ENTRIES = default_faq()
@@ -191,6 +197,75 @@ def test_подтверждает_тему_только_различающее_�
         for language in config.LANGUAGES:
             assert entry.id in fuzzy.supported_topics(entry.question(language)), (
                 entry.id, language)
+
+
+def test_общая_основа_это_не_ещё_один_порог_похожести():
+    """Своё слово темы отличается от нечёткого соседа основой, а не числом.
+
+    Четыре замера, на которых правило согласия ролей и строилось: два
+    ложных совпадения проходят по PAIR_THRESHOLD, две нужные словоформы
+    стоят рядом с ними по числу. По числу они не разделяются, по основе
+    разделяются начисто.
+    """
+    # Нужные словоформы: тот же глагол, другой аффикс.
+    assert shares_stem("озгортсом", "озгортуу")
+    assert shares_stem("алмаштыргым", "алмаштыруу")
+    assert shares_stem("тарифимди", "тарифти")
+    assert shares_stem("номеримди", "номерди")
+    assert shares_stem("симканы", "симка")
+    assert shares_stem("тариф", "тариф")
+    # Ложные совпадения: букв похоже, основы нет.
+    assert not shares_stem("досума", "доступа")
+    assert not shares_stem("салсам", "алам")
+    assert not shares_stem("билет", "билем")
+    for left, right in (("досума", "доступа"), ("салсам", "алам")):
+        assert token_similarity(left, right) >= 0.75, (
+            f"{left}/{right} обязаны быть ловушкой для порога похожести")
+    # Короткое слово родственников не имеет: только дословное совпадение.
+    assert not shares_stem("гб", "гбайт")
+    assert len("гб") < STEM_LENGTH
+
+
+def test_действие_подтверждает_тему_только_вместе_со_своим_объектом():
+    """Третий гейт: действие одной темы плюс объект другой.
+
+    Живая ошибка: «сменить номер» уходило в тему 5 «Как сменить тариф?»
+    с уверенностью 0.63. Глагол принадлежит теме 5 законно и встречается
+    в базе только у неё, поэтому общим корнем он быть не может. Ложным
+    его делает объект: смены номера оператор не предлагает вовсе, и ни
+    одна тема не содержит обоих слов. Подтверждать тему тогда не может
+    ничто — вопрос уходит в отказ с кнопками.
+    """
+    fuzzy = FuzzySearch(ENTRIES)
+    # Операции нет в базе: подтверждения нет ни у кого.
+    for text in ("сменить номер", "как мне сменить номер?", "поменять номер",
+                 "восстановить тариф", "заблокировать тариф",
+                 "пополнить тариф", "номерди алмаштыруу"):
+        assert fuzzy.supported_topics(text) == set(), text
+    # Тот же глагол со своим объектом подтверждает свою тему.
+    assert 5 in fuzzy.supported_topics("хочу сменить тариф")
+    assert 5 in fuzzy.supported_topics("Тарифти алмаштыруу")
+    assert 6 in fuzzy.supported_topics("восстановить симку")
+    assert 13 in fuzzy.supported_topics("заблокировать номер")
+    assert 11 in fuzzy.supported_topics("пополнить счет")
+    assert 9 in fuzzy.supported_topics("перевести на другой номер")
+    # Одна роль в запросе — сверять не с чем, правило молчит.
+    assert 9 in fuzzy.supported_topics("перевести деньги")
+    assert 2 in fuzzy.supported_topics("остаток минут")
+
+
+def test_правило_ролей_опирается_на_слова_темы_а_не_на_опечатки():
+    """Правило разрушительное, поэтому нечёткого совпадения ему мало.
+
+    Оба вопроса законны, и в обоих есть слово, которое по похожести
+    попадает в чужую тему: «досума» (моему другу) похоже на «доступа»
+    темы 10, «салсам» (если положу) — на «алам» темы 15. Пока правило
+    верило похожести, оно объявляло оба запроса противоречивыми и
+    отнимало подтверждение у верной темы — у 9 и 11 соответственно.
+    """
+    fuzzy = FuzzySearch(ENTRIES)
+    assert 9 in fuzzy.supported_topics("Досума акча которсом болобу?")
+    assert 11 in fuzzy.supported_topics("Телефонго акча кайдан салсам болот?")
 
 
 def test_словарное_покрытие_отличает_чужую_лексику():

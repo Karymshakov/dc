@@ -81,6 +81,42 @@ def token_similarity(left: str, right: str) -> float:
     return min(1.0, ratio)
 
 
+def shares_stem(left: str, right: str) -> bool:
+    """Одно ли это слово темы, а не его нечёткий сосед.
+
+    Слово либо написано в точности как в базе, либо отличается только
+    аффиксом: общее начало не короче STEM_LENGTH. Это НЕ ещё один порог
+    похожести — это тот же признак общей основы, на котором уже стоит
+    token_similarity, и та же константа.
+
+    Признак нужен правилу согласия действия с объектом: оно отнимает
+    подтверждение у всех тем сразу, поэтому обязано опираться на слово,
+    которое тема действительно называет, а не на совпадение хвостов.
+    Замеры, из-за которых признак появился, — два ложных совпадения,
+    проходивших по PAIR_THRESHOLD и ронявших верный ответ:
+
+        «досума» (моему другу) ~ «доступа» темы 10   0.77, общих букв 3
+        «салсам» (если положу) ~ «алам» темы 15      0.80, общих букв 0
+
+    и две словоформы, которые правилу нужны и которые любой числовой
+    порог выше 0.83 отрезал бы вместе с ними:
+
+        «озгортсом»   ~ «озгортуу» темы 5            0.83, основа 6 букв
+        «алмаштыргым» ~ «алмаштыруу» темы 5          0.86, основа 6 букв
+
+    По числу эти четыре случая лежат в полосе шириной три сотых, по
+    основе разделяются начисто. Поэтому признак не числовой.
+    """
+    if left == right:
+        return True
+    common = 0
+    for left_char, right_char in zip(left, right):
+        if left_char != right_char:
+            break
+        common += 1
+    return common >= STEM_LENGTH
+
+
 class FuzzySearch:
     """Нечёткое совпадение множеств токенов с весом по редкости слова."""
 
@@ -211,6 +247,17 @@ class FuzzySearch:
                     break
         return found
 
+    def _topics_with_stem(self, terms: list[tuple[str, ...]]) -> set[int]:
+        """Темы, которые НАЗЫВАЮТ хотя бы одно из terms (та же основа)."""
+        found: set[int] = set()
+        for faq_id, words in self.topic_tokens.items():
+            for term in terms:
+                if any(shares_stem(variant, word)
+                       for variant in term for word in words):
+                    found.add(faq_id)
+                    break
+        return found
+
     def supported_topics(self, text: str) -> set[int]:
         """Темы, которые подтверждает хотя бы одно различающее слово запроса.
 
@@ -235,6 +282,20 @@ class FuzzySearch:
         Подтверждать тему в таком случае не может ничто, и вопрос уходит
         в отказ с тремя кнопками, а не в тему ближайшего по буквам глагола.
 
+        Отнимается подтверждение у ВСЕХ тем, а не у одной темы действия.
+        Асимметричный вариант («глагол теряет право, объект сохраняет»)
+        мерился и оказался хуже: «пополнить тариф» уходило из темы 11
+        в тему 5 «Как сменить тариф?» с уверенностью 0.63, то есть одна
+        неверная тема менялась на другую. Противоречие в запросе — свойство
+        запроса, а не одной темы: если такой операции нет, верного первого
+        ответа нет ни у кого, и кнопки честнее темы.
+
+        Срабатывает правило только тогда, когда обе роли стоят в запросе
+        СВОИМИ словами (shares_stem), а не нечёткими соседями. Нечёткого
+        совпадения мало: оно ловит допуск на опечатку и отнимает
+        подтверждение у верной темы — «досума» ~ «доступа» темы 10 и
+        «салсам» ~ «алам» темы 15, оба замера в shares_stem.
+
         Если роль в запросе одна («перевести деньги» — только действие,
         «остаток минут» — только объекты), правило не применяется: сверять
         не с чем, и подтверждение работает как раньше.
@@ -244,13 +305,14 @@ class FuzzySearch:
             return set()
         actions = [term for term in terms if is_action(term)]
         objects = [term for term in terms if not is_action(term)]
+        supported = self._topics_with_any(terms)
         if not actions or not objects:
-            return self._topics_with_any(terms)
-        by_action = self._topics_with_any(actions)
-        by_object = self._topics_with_any(objects)
-        if by_action and by_object and not (by_action & by_object):
+            return supported
+        if self._topics_with_any(actions) & self._topics_with_any(objects):
+            return supported
+        if self._topics_with_stem(actions) and self._topics_with_stem(objects):
             return set()
-        return by_action | by_object
+        return supported
 
     def search(self, text: str, limit: int = 3) -> list[Match]:
         """Кандидаты по убыванию score; пустой запрос даёт пустой список."""

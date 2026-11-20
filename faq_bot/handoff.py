@@ -59,7 +59,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
-from .presentation import Screen, message, reason_label
+from .presentation import (
+    LANGUAGE_NAMES,
+    Screen,
+    message,
+    reason_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -172,16 +177,17 @@ class Ticket:
     question: str
     faq_id: int | None = None
     confidence: float = 0.0
-    note: str | None = None
     at: float = 0.0
 
 
 @dataclass(frozen=True)
-class _Question:
-    """Последний вопрос чата: текст и время."""
+class _LastTurn:
+    """Последняя реплика чата: вопрос, ответ бота на него и время."""
 
     text: str
     at: float
+    faq_id: int | None = None
+    confidence: float = 0.0
 
 
 class HandoffDesk:
@@ -190,9 +196,10 @@ class HandoffDesk:
     Три маленьких хранилища, все в памяти процесса — базы данных в
     задаче нет.
 
-    * `_questions` — последний вопрос каждого чата. Нужен кнопке
-      «0 Оператор»: у нажатия своего текста нет, а оператору важно
-      видеть, с чем абонент пришёл.
+    * `_turns` — последняя реплика каждого чата и ответ бота на неё.
+      Нужна слову «оператор» и кнопке «0 Оператор»: своего текста у них
+      нет, а оператору важно видеть, с чем абонент пришёл и что бот
+      успел ему сказать.
     * `_pending` — обращение, которое чистый слой экранов уже решил
       передать, но отправка ещё не случилась: отправка асинхронная и
       живёт в `bot.py`.
@@ -208,28 +215,48 @@ class HandoffDesk:
         self._limit = max(1, int(limit))
         self._clock = clock
         self._counter = 0
-        self._questions: dict[str, _Question] = {}
+        self._turns: dict[str, _LastTurn] = {}
         self._pending: dict[str, Ticket] = {}
         self._cards: OrderedDict[int, Ticket] = OrderedDict()
 
-    # --- последний вопрос чата -------------------------------------------
+    # --- последняя реплика чата ------------------------------------------
 
     def note_question(self, chat_id: int | str | None, text: str) -> None:
         """Запомнить, о чём абонент спросил последним."""
         question = (text or "").strip()
         if not question:
             return
-        self._questions[str(chat_id)] = _Question(question, self._clock())
+        self._turns[str(chat_id)] = _LastTurn(question, self._clock())
+
+    def note_answer(self, chat_id: int | str | None, faq_id: int | None,
+                    confidence: float) -> None:
+        """Дописать к последней реплике то, что ответил на неё бот.
+
+        Нужно слову «оператор»: оно ветку поиска не проходит вовсе, и без
+        этой записи оператор увидел бы «бот ответа не нашёл», хотя на
+        предыдущий вопрос ответ был.
+        """
+        key = str(chat_id)
+        known = self._turns.get(key)
+        if known is None:
+            return
+        self._turns[key] = _LastTurn(known.text, known.at, faq_id,
+                                     float(confidence or 0.0))
+
+    def last_turn(self, chat_id: int | str | None) -> _LastTurn | None:
+        """Свежая последняя реплика чата или `None`."""
+        known = self._turns.get(str(chat_id))
+        if known is None:
+            return None
+        if self._clock() - known.at > QUESTION_TTL:
+            self._turns.pop(str(chat_id), None)
+            return None
+        return known
 
     def last_question(self, chat_id: int | str | None) -> str:
         """Свежий последний вопрос чата или пустая строка."""
-        known = self._questions.get(str(chat_id))
-        if known is None:
-            return ""
-        if self._clock() - known.at > QUESTION_TTL:
-            self._questions.pop(str(chat_id), None)
-            return ""
-        return known.text
+        known = self.last_turn(chat_id)
+        return known.text if known is not None else ""
 
     # --- обращение --------------------------------------------------------
 
@@ -237,18 +264,27 @@ class HandoffDesk:
                  lang: str = config.DEFAULT_LANGUAGE,
                  question: str = "",
                  faq_id: int | None = None,
-                 confidence: float = 0.0,
-                 note: str | None = None) -> Ticket | None:
+                 confidence: float = 0.0) -> Ticket | None:
         """Завести обращение и отложить его до отправки.
 
         Возвращает `None`, когда пересылка не настроена: номера в этом
         случае не тратятся, и память не растёт. Экран абонента от этого
         не зависит — он одинаков в обоих режимах, разница только в
         строке про ответ оператора.
+
+        Без явного вопроса (кнопка «0 Оператор», слово «оператор») в
+        карточку идёт последняя реплика чата вместе с ответом бота на
+        неё: для человека это и есть состояние разговора.
         """
         if not enabled():
             return None
-        text = (question or "").strip() or self.last_question(chat_id)
+        text = (question or "").strip()
+        if not text:
+            known = self.last_turn(chat_id)
+            if known is not None:
+                text = known.text
+                faq_id = known.faq_id
+                confidence = known.confidence
         if len(text) > QUESTION_LENGTH:
             text = text[:QUESTION_LENGTH].rstrip() + "…"
         self._counter += 1
@@ -260,7 +296,6 @@ class HandoffDesk:
             question=text,
             faq_id=faq_id,
             confidence=float(confidence or 0.0),
-            note=note,
             at=self._clock(),
         )
         # Одно обращение на чат: если абонент нажал оператора дважды,
@@ -298,14 +333,14 @@ class HandoffDesk:
     def clear(self) -> None:
         """Забыть всё (перезапуск, тесты)."""
         self._counter = 0
-        self._questions.clear()
+        self._turns.clear()
         self._pending.clear()
         self._cards.clear()
 
     def forget(self, chat_id: int | str | None) -> None:
         """Забыть один чат абонента: /reset и уборка."""
         key = str(chat_id)
-        self._questions.pop(key, None)
+        self._turns.pop(key, None)
         self._pending.pop(key, None)
 
 
@@ -342,6 +377,10 @@ def _bot_result(ticket: Ticket, language: str) -> str:
     «ответа не нашёл» печатается тоже — это не пустая строка, а важная
     для человека улика.
     """
+    if not ticket.question:
+        # Вопроса не было вовсе — отвечать было нечего, и «ответа не
+        # нашёл» здесь означало бы неудачу, которой не случилось.
+        return "—"
     if ticket.faq_id is None:
         return _t(language, "ответа не нашёл", "жооп таппады")
     from .answer import entry_by_id
@@ -364,20 +403,20 @@ def card(ticket: Ticket,
     а собирать лишнее о человеке мы не имеем права.
     """
     head = _t(language, "Обращение", "Кайрылуу")
-    lines = [f"🧑‍💼 <b>{_esc(head)} {_esc(ticket.number)}</b>"]
+    lines = [f"🧑‍💼 <b>{_esc(head)} № {_esc(ticket.number)}</b>"]
     if ticket.reason:
         lines.append(f"<i>{_esc(reason_label(ticket.reason, language))}</i>")
-    if ticket.note:
-        lines.append(f"<i>{_esc(message(ticket.note, language))}</i>")
 
-    language_name = _t(language, "язык абонента", "абонент тили")
-    names = {"ru": "Русский", "ky": "Кыргызча"}
+    label = _t(language, "язык абонента", "абонент тили")
+    name = LANGUAGE_NAMES.get(ticket.lang, ticket.lang)
     lines.append("")
-    lines.append(f"{_esc(language_name)}: <b>{_esc(names.get(ticket.lang, ticket.lang))}</b>")
+    lines.append(f"{_esc(label)}: <b>{_esc(name)}</b>")
 
     question_label = _t(language, "вопрос", "суроо")
-    question = ticket.question or _t(language, "(текста нет: нажата кнопка)",
-                                     "(текст жок: баскыч басылды)")
+    question = ticket.question or _t(
+        language,
+        "(своего вопроса нет: сразу попросили человека)",
+        "(өз суроосу жок: дароо адам сурады)")
     lines.append(f"{_esc(question_label)}: «{_esc(question)}»")
 
     bot_label = _t(language, "бот ответил", "бот жооп берди")
@@ -400,5 +439,5 @@ def notice(name: str, language: str = config.DEFAULT_LANGUAGE,
     """
     text = _esc(message(name, language))
     if ticket is not None:
-        text = f"{text} <code>{_esc(ticket.number)}</code>"
+        text = f"{text} № <code>{_esc(ticket.number)}</code>"
     return Screen(text)

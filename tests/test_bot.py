@@ -24,10 +24,33 @@ from pathlib import Path
 
 import pytest
 
-from faq_bot import bot, config, presentation
+from faq_bot import bot, config, handoff, presentation
 from faq_bot.answer import answer, entry_by_id, stats_snapshot
 
 OUT_OF_SCOPE = "Какая погода будет в Бишкеке в субботу?"
+
+#: Операторский чат для тестов. Отрицательный id — как у настоящей группы.
+OPERATOR_CHAT = -5500000001
+
+
+@pytest.fixture(autouse=True)
+def operator_chat_is_not_configured(monkeypatch):
+    """По умолчанию передача оператору не настроена.
+
+    Иначе тесты зависели бы от машины: в рабочем `.env` у `OPERATOR_CHAT_ID`
+    есть значение, и бот начал бы пересылать обращения в настоящую группу
+    прямо из прогона. Тест, которому пересылка нужна, включает её сам
+    (:func:`_operator_chat`).
+    """
+    monkeypatch.delenv(handoff.OPERATOR_CHAT_ENV, raising=False)
+    monkeypatch.setattr(handoff, "ENV_FILE",
+                        Path(__file__).with_name("нет-такого.env"))
+
+
+def _operator_chat(monkeypatch, chat_id: int = OPERATOR_CHAT) -> str:
+    """Включить передачу оператору в этот чат."""
+    monkeypatch.setenv(handoff.OPERATOR_CHAT_ENV, str(chat_id))
+    return str(chat_id)
 
 
 class _Clock:
@@ -198,18 +221,22 @@ class _Dialog:
     чате и сколько раз они переписаны.
     """
 
-    def __init__(self, chat_id: int, clock: _Clock | None = None) -> None:
+    def __init__(self, chat_id: int, clock: _Clock | None = None,
+                 context: object | None = None) -> None:
         self.chat_id = chat_id
         self.clock = clock or _Clock()
         bot._flow = bot.ConversationFlow(clock=self.clock)
         self.sent: list[_FakeSent] = []
         #: Сюда тест кладёт ошибку, которой Telegram ответит на правку.
         self.edit_error: list[BaseException] = []
+        #: Клиент Telegram нужен только пересылке оператору; обычным
+        #: ответам он не требуется, поэтому по умолчанию его нет.
+        self.context = context
 
     def says(self, text: str) -> _Dialog:
         """Абонент пишет реплику."""
         update = _FakeUpdate(self.chat_id, text, self.edit_error)
-        asyncio.run(bot._on_text(update, None))
+        asyncio.run(bot._on_text(update, self.context))
         self.sent.extend(update.effective_message.replies)
         return self
 
@@ -217,7 +244,7 @@ class _Dialog:
         """Абонент присылает голосовое."""
         update = _FakeUpdate(self.chat_id, "", self.edit_error)
         update.effective_message.voice = voice
-        asyncio.run(bot._on_voice(update, None))
+        asyncio.run(bot._on_voice(update, self.context))
         self.sent.extend(update.effective_message.replies)
         return self
 
@@ -582,7 +609,8 @@ def test_second_refusal_hands_the_dialog_to_a_human():
     screen = bot.screen_for_text("всё равно не работает", 102)
     rendered = _text(screen)
 
-    assert entry_by_id(14).answer_ru in rendered
+    assert presentation.operator_facts(entry_by_id(14), "ru") in rendered
+    assert "Напишите «оператор»" not in rendered
     assert "Совет не помог" in rendered
     assert "Больше советов по этой теме" in rendered
     reasons = dict(stats_snapshot().operator_reasons)
@@ -1468,11 +1496,16 @@ def test_word_matching_uses_normalized_prefix():
 # --------------------------------------------------------------------------
 
 def test_operator_word_still_reaches_operator():
-    """Бонус ТЗ на месте: слово «оператор» ведёт к живому человеку."""
+    """Бонус ТЗ на месте: слово «оператор» ведёт к живому человеку.
+
+    И не цитирует при этом инструкцию «напишите „оператор“ в боте» —
+    человек её только что выполнил. Факт из базы (часы работы) остаётся.
+    """
     rendered = _text(bot.screen_for_text("оператор", 41))
 
-    assert entry_by_id(14).answer_ru in rendered
     assert "Попросили оператора" in rendered
+    assert presentation.operator_facts(entry_by_id(14), "ru") in rendered
+    assert "Напишите «оператор»" not in rendered
 
 
 @pytest.mark.parametrize("text, label", [
@@ -1643,3 +1676,411 @@ def test_a_long_thought_in_four_parts_stays_one_message():
     assert len(chat.sent) == 1
     assert chat.edits == 3
     assert entry_by_id(3).answer_ky in chat.last
+
+
+# --------------------------------------------------------------------------
+# Передача оператору живому человеку: карточка в его чат и реплай обратно
+# --------------------------------------------------------------------------
+
+class _Posted:
+    """Сообщение, которое бот отправил не в ответ, а в другой чат."""
+
+    def __init__(self, message_id: int, chat_id: object, text: str,
+                 markup: object = None) -> None:
+        self.message_id = message_id
+        self.chat_id = chat_id
+        self.text = text
+        self.markup = markup
+
+
+class _FakeBot:
+    """Клиент Telegram в объёме, нужном пересылке: один `send_message`."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.posted: list[_Posted] = []
+        self._error = error
+        self._next_id = 900
+
+    async def send_message(self, chat_id: object, text: str,
+                           **kwargs: object) -> _Posted:
+        if self._error is not None:
+            raise self._error
+        self._next_id += 1
+        sent = _Posted(self._next_id, chat_id, text,
+                       kwargs.get("reply_markup"))
+        self.posted.append(sent)
+        return sent
+
+    def to(self, chat_id: object) -> list[_Posted]:
+        """Что ушло в этот чат."""
+        return [item for item in self.posted
+                if str(item.chat_id) == str(chat_id)]
+
+
+class _FakeContext:
+    """`context` обработчика: из него пересылке нужен только `bot`."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.bot = _FakeBot(error)
+
+
+class _OperatorUpdate:
+    """Сообщение в операторском чате, с реплаем или без."""
+
+    def __init__(self, text: str, reply_to: int | None = None,
+                 chat_id: int = OPERATOR_CHAT, voice: object = None) -> None:
+        self.effective_chat = type("Chat", (), {"id": chat_id,
+                                                "username": None})()
+        self.effective_message = _FakeMessage(text)
+        self.effective_message.voice = voice
+        self.effective_message.reply_to_message = (
+            None if reply_to is None
+            else type("Replied", (), {"message_id": reply_to})())
+
+
+def _operator_says(text: str, reply_to: int | None = None,
+                   context: _FakeContext | None = None,
+                   voice: object = None) -> _OperatorUpdate:
+    """Оператор пишет в своём чате через настоящий обработчик."""
+    update = _OperatorUpdate(text, reply_to, voice=voice)
+    asyncio.run(bot._on_operator_message(update, context or _FakeContext()))
+    return update
+
+
+def _ask_with_operator(monkeypatch, chat_id: int,
+                       text: str) -> tuple[_Dialog, _FakeBot]:
+    """Абонент пишет в чат, где передача оператору настроена."""
+    _operator_chat(monkeypatch)
+    context = _FakeContext()
+    chat = _Dialog(chat_id, context=context)
+    chat.says(text)
+    return chat, context.bot
+
+
+def test_without_an_operator_chat_the_bot_forwards_nothing():
+    """Переменной нет — всё работает как прежде: ни падений, ни ошибок."""
+    pytest.importorskip("telegram")
+    context = _FakeContext()
+    chat = _Dialog(200, context=context)
+
+    chat.says("оператор")
+
+    assert not handoff.enabled()
+    assert context.bot.posted == []
+    assert "Попросили оператора" in chat.last
+    assert "🎫" not in chat.last
+    assert len(chat.sent) == 1
+
+
+def test_handoff_sends_a_card_to_the_operator_chat(monkeypatch):
+    """Обращение уходит карточкой в операторский чат."""
+    pytest.importorskip("telegram")
+    target = _operator_chat(monkeypatch)
+    context = _FakeContext()
+    chat = _Dialog(201, context=context)
+
+    chat.says("почему не работает интернет")
+    chat.clock.advance(60.0)
+    chat.says("оператор")
+
+    cards = context.bot.to(target)
+    assert len(cards) == 1
+    card = cards[0]
+    assert "Обращение № 0001" in card.text
+    assert "Попросили оператора" in card.text          # причина с подписью
+    assert "Русский" in card.text                      # язык абонента
+    assert "почему не работает интернет" in card.text  # текст вопроса
+    assert "тема 3" in card.text                       # что ответил бот
+    assert "уверенность" in card.text
+    assert "реплаем" in card.text                      # как отвечать
+
+
+def test_the_card_carries_no_personal_data(monkeypatch):
+    """В карточке нет ни имени, ни username, ни chat_id абонента.
+
+    Для ответа по существу они не нужны: доставку обеспечивает реплай,
+    а чат абонента помнит бот. Уточнения организаторов требуют не
+    раскрывать чужие персональные данные — не собирать лишнего это то же
+    правило, только на шаг раньше.
+    """
+    pytest.importorskip("telegram")
+    target = _operator_chat(monkeypatch)
+    context = _FakeContext()
+    update = _FakeUpdate(2024771, "хочу написать жалобу")
+    update.effective_user = type("User", (), {"first_name": "Айбек",
+                                              "username": "aibek_kg",
+                                              "id": 2024771})()
+
+    asyncio.run(bot._on_text(update, context))
+    card = context.bot.to(target)[0].text
+
+    assert "Айбек" not in card
+    assert "aibek_kg" not in card
+    assert "2024771" not in card
+    assert "Жалоба или претензия" in card
+
+
+def test_the_subscriber_learns_that_the_request_is_accepted(monkeypatch):
+    """Абонент видит номер обращения и что ответ придёт сюда же."""
+    pytest.importorskip("telegram")
+
+    chat, _ = _ask_with_operator(monkeypatch, 202, "оператор")
+
+    assert len(chat.sent) == 1                  # правка, а не второе письмо
+    assert chat.edits == 1
+    assert "🎫" in chat.last
+    assert "0001" in chat.last
+    assert "ответ придёт в этот же чат" in chat.last
+
+
+def test_a_promise_is_not_given_when_the_card_did_not_reach(monkeypatch):
+    """Карточка не ушла — ответа оператора абоненту не обещаем."""
+    pytest.importorskip("telegram")
+    _operator_chat(monkeypatch)
+    context = _FakeContext(RuntimeError("чат не найден"))
+    chat = _Dialog(203, context=context)
+
+    chat.says("оператор")
+
+    assert "🎫" not in chat.last
+    assert "ответ придёт" not in chat.last
+    assert "Попросили оператора" in chat.last   # сам ответ бота на месте
+
+
+def test_operator_reply_reaches_exactly_that_subscriber(monkeypatch):
+    """Реплай оператора доставляется тому абоненту, чья это карточка."""
+    pytest.importorskip("telegram")
+    target = _operator_chat(monkeypatch)
+    context = _FakeContext()
+    _Dialog(204, context=context).says("оператор")
+    _Dialog(205, context=context).says("оператор")
+    cards = context.bot.to(target)
+
+    _operator_says("Проверил вашу линию, авария устранена.",
+                   reply_to=cards[0].message_id, context=context)
+
+    delivered = context.bot.to(204)
+    assert len(delivered) == 1
+    assert "Ответ оператора" in delivered[0].text
+    assert "Проверил вашу линию" in delivered[0].text
+    assert context.bot.to(205) == []            # чужому абоненту — ничего
+
+
+def test_operator_gets_a_receipt_for_a_delivered_answer(monkeypatch):
+    """Оператор видит расписку: его текст доставлен."""
+    pytest.importorskip("telegram")
+    target = _operator_chat(monkeypatch)
+    context = _FakeContext()
+    _Dialog(206, context=context).says("оператор")
+    card = context.bot.to(target)[0]
+
+    update = _operator_says("Уже включили.", reply_to=card.message_id,
+                            context=context)
+
+    assert len(update.effective_message.replies) == 1
+    assert "доставлен" in update.effective_message.replies[0].text
+    assert "0001" in update.effective_message.replies[0].text
+
+
+def test_operator_answer_is_delivered_in_the_language_of_the_subscriber(
+        monkeypatch):
+    """Пометка ответа печатается на языке абонента, а не оператора."""
+    pytest.importorskip("telegram")
+    target = _operator_chat(monkeypatch)
+    context = _FakeContext()
+    _Dialog(207, context=context).says("менин интернетим иштебейт, оператор")
+    card = context.bot.to(target)[0]
+
+    _operator_says("Текшердик, азыр иштейт.", reply_to=card.message_id,
+                   context=context)
+
+    assert "Кыргызча" in card.text
+    assert "Оператордун жообу" in context.bot.to(207)[0].text
+
+
+def test_a_reply_to_an_unknown_card_gets_an_explanation(monkeypatch):
+    """Бот перезапускался и карточку не помнит — говорим об этом прямо."""
+    pytest.importorskip("telegram")
+    _operator_chat(monkeypatch)
+    context = _FakeContext()
+
+    update = _operator_says("Перезвоните абоненту", reply_to=777,
+                            context=context)
+
+    assert context.bot.posted == []             # абоненту ничего не ушло
+    assert len(update.effective_message.replies) == 1
+    assert "перезапускался" in update.effective_message.replies[0].text
+
+
+def test_a_message_from_the_operator_chat_is_not_a_question(monkeypatch):
+    """Сообщение из операторского чата не идёт обычным путём поиска."""
+    pytest.importorskip("telegram")
+    _operator_chat(monkeypatch)
+    context = _FakeContext()
+    update = _FakeUpdate(OPERATOR_CHAT, "как проверить баланс")
+
+    asyncio.run(bot._on_text(update, context))
+
+    assert update.effective_message.replies == []
+    assert context.bot.posted == []
+    assert stats_snapshot().total == 0
+
+
+def test_an_operator_message_without_a_reply_is_left_alone(monkeypatch):
+    """Переписка операторов между собой бота не касается."""
+    pytest.importorskip("telegram")
+    _operator_chat(monkeypatch)
+    context = _FakeContext()
+
+    update = _operator_says("коллеги, я на обеде", context=context)
+
+    assert update.effective_message.replies == []
+    assert context.bot.posted == []
+
+
+def test_a_voice_from_the_operator_is_not_processed(monkeypatch):
+    """Голосовые от оператора не обрабатываются — ни текстом, ни деньгами."""
+    pytest.importorskip("telegram")
+    _operator_chat(monkeypatch)
+    context = _FakeContext()
+    _Dialog(208, context=context).says("оператор")
+    card = context.bot.to(str(OPERATOR_CHAT))[0]
+    before = len(context.bot.posted)
+
+    update = _operator_says("", reply_to=card.message_id, context=context,
+                            voice=_FakeVoice())
+    voice_update = _FakeUpdate(OPERATOR_CHAT, "")
+    voice_update.effective_message.voice = _FakeVoice()
+    asyncio.run(bot._on_voice(voice_update, context))
+
+    assert update.effective_message.replies == []
+    assert voice_update.effective_message.replies == []
+    assert len(context.bot.posted) == before
+
+
+def test_the_desk_keeps_the_link_in_memory_only(monkeypatch):
+    """Связь «карточка ↔ абонент» живёт в памяти процесса, без БД."""
+    pytest.importorskip("telegram")
+    target = _operator_chat(monkeypatch)
+    context = _FakeContext()
+    _Dialog(209, context=context).says("оператор")
+    card = context.bot.to(target)[0]
+
+    found = handoff.DESK.find(card.message_id)
+    handoff.DESK.clear()
+
+    assert found is not None
+    assert found.chat_id == "209"
+    assert handoff.DESK.find(card.message_id) is None
+
+
+def test_the_button_hands_over_the_last_question(monkeypatch):
+    """Кнопка «0 Оператор» своего текста не имеет — везём последний вопрос."""
+    pytest.importorskip("telegram")
+    target = _operator_chat(monkeypatch)
+    context = _FakeContext()
+    chat = _Dialog(210, context=context)
+    chat.says("почему не работает интернет")
+
+    query = _FakeQuery("operator")
+    asyncio.run(bot._on_button(_FakeButtonUpdate(210, query), context))
+
+    assert "почему не работает интернет" in context.bot.to(target)[0].text
+    assert "🎫" in query.edits[-1][0]
+    assert "0001" in query.edits[-1][0]
+    assert query.message.replies == []          # и ни одного нового письма
+
+
+def test_every_handoff_counted_in_stats_reaches_the_operator(monkeypatch):
+    """Что попало в /stats как переданное, то и ушло человеку."""
+    pytest.importorskip("telegram")
+    target = _operator_chat(monkeypatch)
+    context = _FakeContext()
+
+    _Dialog(211, context=context).says("оператор")
+    _Dialog(212, context=context).says("верните деньги немедленно")
+    chat = _Dialog(213, context=context)
+    for _ in range(3):
+        chat.clock.advance(60.0)
+        chat.says(OUT_OF_SCOPE)
+
+    reasons = dict(stats_snapshot().operator_reasons)
+    assert reasons == {"direct_request": 1, "refund": 1, "repeated_miss": 1}
+    assert len(context.bot.to(target)) == sum(reasons.values())
+
+
+def test_the_operator_handler_is_registered_only_when_configured(monkeypatch):
+    """Обработчик операторского чата подключается, только если он задан."""
+    telegram = pytest.importorskip("telegram")
+    import warnings
+
+    def handlers() -> list:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            application = bot.build_application(
+                "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        return [item for item in application.handlers[0]
+                if getattr(item, "callback", None) is bot._on_operator_message]
+
+    assert handlers() == []
+    _operator_chat(monkeypatch)
+    registered = handlers()
+
+    assert len(registered) == 1
+    assert isinstance(registered[0], telegram.ext.MessageHandler)
+
+
+def test_the_operator_chat_is_read_from_the_env_file(monkeypatch, tmp_path):
+    """`OPERATOR_CHAT_ID` читается так же, как токен: окружение или .env."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("# комментарий\nOPERATOR_CHAT_ID=-100500\n",
+                        encoding="utf-8")
+    monkeypatch.setattr(handoff, "ENV_FILE", env_file)
+
+    assert handoff.operator_chat() == "-100500"
+    assert handoff.is_operator_chat(-100500)
+    assert not handoff.is_operator_chat(777)
+    monkeypatch.setenv(handoff.OPERATOR_CHAT_ENV, "-42")
+    assert handoff.operator_chat() == "-42"       # окружение главнее файла
+
+
+def test_a_broken_env_file_is_not_a_crash(monkeypatch, tmp_path):
+    """Нет файла или он нечитаем — пустая строка, а не трассировка."""
+    monkeypatch.setattr(handoff, "ENV_FILE", tmp_path / "нет-такого")
+
+    assert handoff.operator_chat() == ""
+    assert not handoff.enabled()
+    assert not handoff.is_operator_chat(OPERATOR_CHAT)
+    assert handoff.DESK.remember(1, "direct_request") is None
+
+
+def test_the_desk_does_not_grow_without_a_limit():
+    """Память карточек ограничена: долгий прогон не съедает её целиком."""
+    desk = handoff.HandoffDesk(limit=2)
+    tickets = [handoff.Ticket(f"{number:04d}", str(number), "ru",
+                              "direct_request", "вопрос")
+               for number in range(3)]
+    for number, ticket in enumerate(tickets):
+        desk.bind(number, ticket)
+
+    assert desk.find(0) is None                  # самая старая вытеснена
+    assert desk.find(1) is tickets[1]
+    assert desk.find(2) is tickets[2]
+
+
+def test_a_bare_request_for_a_human_is_honest_in_the_card(monkeypatch):
+    """Первой же репликой «оператор»: вопроса не было — так и написано.
+
+    «Бот ответа не нашёл» в этом месте означало бы неудачу поиска,
+    которой не случилось: искать было нечего.
+    """
+    pytest.importorskip("telegram")
+    target = _operator_chat(monkeypatch)
+    context = _FakeContext()
+    _Dialog(214, context=context).says("оператор")
+
+    card = context.bot.to(target)[0].text
+
+    assert "своего вопроса нет" in card
+    assert "ответа не нашёл" not in card
+    assert "Попросили оператора" in card

@@ -621,7 +621,7 @@ def with_ticket_note(screen: Screen, ticket: str,
     не принять сообщение.
     """
     note = message("operator_queued", language)
-    text = (f"{screen.text}\n\n🎫 <code>{_esc(ticket)}</code>\n"
+    text = (f"{screen.text}\n\n🎫 № <code>{_esc(ticket)}</code>\n"
             f"<i>{_esc(note)}</i>")
     return Screen(text, screen.rows, screen.parse_mode)
 

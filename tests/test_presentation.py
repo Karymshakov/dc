@@ -169,6 +169,10 @@ def _screens(language: str) -> list[Screen]:
         presentation.help_screen(language),
         presentation.operator_screen(entry_by_id(14), language,
                                      "direct_request"),
+        presentation.with_ticket_note(
+            presentation.operator_screen(entry_by_id(14), language,
+                                         "direct_request"), "0001", language),
+        presentation.operator_answer_screen("—", language),
     ]
 
 
@@ -222,10 +226,16 @@ def test_digit_input_opens_section():
 
 
 def test_zero_calls_operator():
-    """«0» — оператор, как и положено в USSD-меню."""
+    """«0» — оператор, как и положено в USSD-меню.
+
+    Экран подтверждает передачу и оставляет из темы 14 только факт —
+    часы работы. Инструкцию «напишите „оператор“» человеку, который
+    только что нажал «0», не цитируем.
+    """
     text = presentation.plain_text(bot.screen_for_text("0"))
 
-    assert entry_by_id(14).answer_ru in text
+    assert presentation.operator_facts(entry_by_id(14), "ru") in text
+    assert "Напишите «оператор»" not in text
 
 
 def test_free_input_always_works():
@@ -516,7 +526,123 @@ def test_operator_word_reaches_operator():
     """Бонус ТЗ: слово «оператор» ведёт к живому оператору."""
     text = presentation.plain_text(bot.screen_for_text("оператор", 7))
 
+    assert "Попросили оператора" in text
+    assert presentation.operator_facts(entry_by_id(14), "ru") in text
+
+
+# --------------------------------------------------------------------------
+# Абсурд на слове «оператор»: инструкция вместо подтверждения
+# --------------------------------------------------------------------------
+
+def test_handoff_does_not_quote_the_instruction_it_was_just_followed():
+    """Живой тест: «оператор» → «Напишите „оператор“ в боте».
+
+    Текст темы 14 написан как ответ на вопрос «как связаться с
+    поддержкой». Человеку, который эту инструкцию только что выполнил,
+    она бессмысленна, поэтому при известной причине передачи экран её не
+    цитирует.
+    """
+    screen = presentation.operator_screen(entry_by_id(14), "ru",
+                                          "direct_request")
+    text = presentation.plain_text(screen)
+
+    assert "Напишите «оператор» в боте" not in text
+    assert entry_by_id(14).answer_ru not in text
+    assert "Обращение принято" in text
+
+
+def test_handoff_keeps_the_facts_from_the_base():
+    """Часы работы остаются: факты берём из faq.json, а не сочиняем."""
+    text = presentation.plain_text(
+        presentation.operator_screen(entry_by_id(14), "ru", "complaint"))
+
+    assert "09:00–18:00" in text
+    assert "09:00–18:00" in entry_by_id(14).answer_ru
+
+
+@pytest.mark.parametrize("language, marker", [
+    ("ru", "Учебная поддержка работает ежедневно 09:00–18:00."),
+    ("ky", "Окуу колдоо кызматы күн сайын 09:00–18:00 иштейт."),
+])
+def test_operator_facts_are_parsed_not_rewritten(language, marker):
+    """Факт разбирается из ответа темы 14 дословно, на двух языках."""
+    facts = presentation.operator_facts(entry_by_id(14), language)
+
+    assert facts == marker
+    assert facts in entry_by_id(14).answer(language)
+    assert "жазыңыз" not in facts and "Напишите" not in facts
+
+
+def test_operator_facts_survive_a_base_without_hours():
+    """В базе нет времени — остаётся всё, кроме самой инструкции.
+
+    Правка faq.json не имеет права превращать экран передачи в молчание.
+    """
+    from faq_bot.contracts import FaqEntry
+
+    entry = FaqEntry(14, "вопрос", "суроо",
+                     "Напишите «оператор» в боте. Поддержка работает.",
+                     "Ботко «оператор» деп жазыңыз. Колдоо иштейт.")
+
+    assert presentation.operator_facts(entry, "ru") == "Поддержка работает."
+    assert presentation.operator_facts(entry, "ky") == "Колдоо иштейт."
+    assert presentation.operator_facts(None, "ru") == ""
+
+
+def test_a_question_about_support_still_gets_the_instruction():
+    """А вопрос «как связаться с поддержкой» инструкцию получает.
+
+    Причина передачи не указана: тема 14 пришла обычным путём, и
+    инструкция из базы здесь уместна.
+    """
+    text = presentation.plain_text(
+        presentation.operator_screen(entry_by_id(14), "ru"))
+
     assert entry_by_id(14).answer_ru in text
+
+
+def test_topic_14_by_button_is_an_ordinary_card():
+    """Кнопка «как связаться с оператором» — обычная карточка темы."""
+    text = presentation.plain_text(bot.screen_for_action("faq:14", 7))
+
+    assert entry_by_id(14).answer_ru in text
+
+
+def test_ticket_note_is_added_only_after_real_delivery():
+    """Номер обращения и обещание ответа дописываются к готовому экрану."""
+    screen = presentation.operator_screen(entry_by_id(14), "ru",
+                                          "direct_request")
+    noted = presentation.with_ticket_note(screen, "0007", "ru")
+
+    assert "0007" not in presentation.plain_text(screen)
+    assert "0007" in presentation.plain_text(noted)
+    assert "ответ придёт в этот же чат" in presentation.plain_text(noted)
+    assert noted.rows == screen.rows
+
+
+@pytest.mark.parametrize("language, title", [
+    ("ru", "🧑‍💼 Ответ оператора"),
+    ("ky", "🧑‍💼 Оператордун жообу"),
+])
+def test_operator_answer_is_marked_as_a_human_answer(language, title):
+    """Слова человека помечены: это другое обещание, чем ответ из базы."""
+    text = presentation.plain_text(
+        presentation.operator_answer_screen("Проверил, всё включено.",
+                                            language))
+
+    assert text.startswith(title)
+    assert "Проверил, всё включено." in text
+
+
+def test_operator_answer_is_trimmed_and_escaped():
+    """Длинный ответ обрезается, разметка абонента не ломает сообщение."""
+    screen = presentation.operator_answer_screen("<b>дома</b> & на работе")
+    long_answer = presentation.operator_answer_screen(
+        "я" * (presentation.OPERATOR_REPLY_LENGTH + 500))
+
+    assert "&lt;b&gt;" in screen.text
+    assert "&amp;" in screen.text
+    assert len(long_answer.text) < presentation.OPERATOR_REPLY_LENGTH + 200
 
 
 def test_all_button_actions_fit_telegram_limit():
