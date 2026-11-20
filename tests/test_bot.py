@@ -1,9 +1,14 @@
-"""Тесты слоя бота: флуд, склейка реплик, приветствия, выбор языка.
+"""Тесты слоя бота: флуд, ход разговора, голос, приветствия, язык.
 
-Четыре дефекта, найденные живым тестированием в Telegram, проверяются
-здесь без самого Telegram: `bot.screen_for_text()` и
-`bot.screen_for_action()` — чистые функции, а склейка сообщений написана
-на обычных задачах asyncio.
+Дефекты, найденные живым тестированием в Telegram, проверяются здесь без
+самого Telegram: `bot.screen_for_text()` и `bot.screen_for_action()` —
+чистые функции, а обработчики вызываются с поддельным обновлением.
+
+Два дефекта разобраны дословно по переписке. «Бот повторил свой же
+ответ, когда ему сказали, что совет не помог» — группа про отказ.
+«Бот вклинился на середине мысли, набранной по-кыргызски с телефона» —
+группа про дозревание ответа. Голосовые проверяются с подменённым
+распознаванием: настоящий ключ оплачивает человек.
 
 Главное ограничение проекта, которое эти тесты тоже охраняют: контракт
 `answer()` не меняется. Приветствия и болтовня живут в слое бота, а
@@ -15,6 +20,7 @@ import asyncio
 import importlib
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -116,95 +122,849 @@ def test_long_message_limit_comes_from_config():
 
 
 # --------------------------------------------------------------------------
-# Дефект 2: склейка подряд идущих сообщений
+# Дефект 2: ответ дозревает, а не ждёт тишины
 # --------------------------------------------------------------------------
 
-def _collect(window: float, chats: list[tuple[int, str]]) -> list[tuple]:
-    """Прогнать реплики через буфер и вернуть всё, что он отправил."""
-    sent: list[tuple] = []
+class _FakeSent:
+    """Сообщение, которое бот уже отправил: его можно переписать."""
 
-    async def scenario() -> None:
-        buffer = bot.MessageBuffer(window=window)
-        tasks = []
-        for chat_id, text in chats:
-            async def flush(joined: str, chat_id: int = chat_id) -> None:
-                sent.append((chat_id, joined))
+    def __init__(self, text: str, markup: object = None,
+                 error: list[BaseException] | None = None) -> None:
+        self.text = text
+        self.markup = markup
+        self.edits: list[tuple[str, object]] = []
+        #: Список, в который тест кладёт ошибку Telegram уже после
+        #: отправки: именно так и выглядит живой случай «сообщение
+        #: удалили, а потом пришла дописка».
+        self._error = error if error is not None else []
 
-            tasks.append(buffer.push(chat_id, text, flush))
-        await asyncio.gather(*tasks)
-
-    asyncio.run(scenario())
-    return sent
-
-
-def test_three_messages_in_a_row_get_one_answer():
-    """Одна проблема тремя репликами — один ответ на склеенный текст."""
-    sent = _collect(0.05, [
-        (7, "привет"),
-        (7, "у меня там не работает интернет"),
-        (7, "можете сказать что случилось"),
-    ])
-
-    assert len(sent) == 1
-    assert sent[0][1] == ("привет у меня там не работает интернет "
-                          "можете сказать что случилось")
-
-
-def test_single_message_behaves_as_before():
-    """Одна реплика за окно — поведение не меняется."""
-    sent = _collect(0.05, [(7, "Как проверить баланс?")])
-
-    assert sent == [(7, "Как проверить баланс?")]
-
-
-def test_buffer_does_not_mix_chats():
-    """Реплики разных чатов не склеиваются между собой."""
-    sent = _collect(0.05, [(1, "не работает интернет"), (2, "как сменить тариф")])
-
-    assert sorted(sent) == [(1, "не работает интернет"), (2, "как сменить тариф")]
-
-
-def test_merged_question_finds_the_topic():
-    """Склеенный текст разбирается как один вопрос и находит тему."""
-    joined = bot.MessageBuffer.join(["привет", "у меня там не работает интернет",
-                                     "можете сказать что случилось"])
-    screen = bot.screen_for_text(joined, 3)
-
-    assert entry_by_id(3).answer_ru in _text(screen)
-
-
-def test_merge_window_is_configured_in_rules():
-    """Окно склейки задано конфигом и лежит в разрешённых пределах."""
-    window = presentation.rules().limits.merge_window_seconds
-
-    assert 1.5 <= window <= 2.5
-    assert bot.MessageBuffer().window == window
-
-
-def test_buffer_ignores_empty_replies():
-    """Пустые реплики не рождают пустого ответа."""
-    sent = _collect(0.05, [(5, "   "), (5, "")])
-
-    assert sent == []
+    async def edit_text(self, text: str, **kwargs: object) -> None:
+        if self._error:
+            raise self._error[0]
+        self.text = text
+        self.markup = kwargs.get("reply_markup")
+        self.edits.append((text, kwargs.get("reply_markup")))
 
 
 class _FakeMessage:
     """Сообщение Telegram в объёме, который нужен обработчику."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str = "",
+                 edit_error: list[BaseException] | None = None) -> None:
         self.text = text
-        self.replies: list[str] = []
+        self.voice: object | None = None
+        self.replies: list[_FakeSent] = []
+        #: Чем Telegram ответит на попытку переписать отправленное.
+        self.edit_error = edit_error if edit_error is not None else []
 
-    async def reply_text(self, text: str, **kwargs: object) -> None:
-        self.replies.append(text)
+    async def reply_text(self, text: str, **kwargs: object) -> _FakeSent:
+        sent = _FakeSent(text, kwargs.get("reply_markup"), self.edit_error)
+        self.replies.append(sent)
+        return sent
 
 
 class _FakeUpdate:
     """Обновление Telegram: чат и сообщение, больше обработчику не нужно."""
 
-    def __init__(self, chat_id: int, text: str) -> None:
+    def __init__(self, chat_id: int, text: str = "",
+                 edit_error: list[BaseException] | None = None) -> None:
         self.effective_chat = type("Chat", (), {"id": chat_id})()
-        self.effective_message = _FakeMessage(text)
+        self.effective_message = _FakeMessage(text, edit_error)
+
+
+class _FakeVoice:
+    """Голосовое вложение: длительность и скачивание файла."""
+
+    def __init__(self, duration: int = 5, payload: bytes = b"opus" * 300,
+                 folder: list[str] | None = None) -> None:
+        self.duration = duration
+        self.file_unique_id = "voice-1"
+        self._payload = payload
+        self.saved: list[str] = []
+        self.left_on_disk = folder if folder is not None else []
+
+    async def get_file(self) -> _FakeVoice:
+        return self
+
+    async def download_to_drive(self, custom_path: str) -> None:
+        self.saved.append(custom_path)
+        Path(custom_path).write_bytes(self._payload)
+
+
+class _Dialog:
+    """Переписка одного чата через настоящие обработчики бота.
+
+    Считает ровно то, что видит абонент: сколько сообщений появилось в
+    чате и сколько раз они переписаны.
+    """
+
+    def __init__(self, chat_id: int, clock: _Clock | None = None) -> None:
+        self.chat_id = chat_id
+        self.clock = clock or _Clock()
+        bot._flow = bot.ConversationFlow(clock=self.clock)
+        self.sent: list[_FakeSent] = []
+        #: Сюда тест кладёт ошибку, которой Telegram ответит на правку.
+        self.edit_error: list[BaseException] = []
+
+    def says(self, text: str) -> _Dialog:
+        """Абонент пишет реплику."""
+        update = _FakeUpdate(self.chat_id, text, self.edit_error)
+        asyncio.run(bot._on_text(update, None))
+        self.sent.extend(update.effective_message.replies)
+        return self
+
+    def sends_voice(self, voice: _FakeVoice) -> _Dialog:
+        """Абонент присылает голосовое."""
+        update = _FakeUpdate(self.chat_id, "", self.edit_error)
+        update.effective_message.voice = voice
+        asyncio.run(bot._on_voice(update, None))
+        self.sent.extend(update.effective_message.replies)
+        return self
+
+    @property
+    def messages(self) -> list[str]:
+        """Текст всех сообщений чата в их нынешнем виде."""
+        return [sent.text for sent in self.sent]
+
+    @property
+    def last(self) -> str:
+        """Последнее сообщение чата."""
+        return self.sent[-1].text
+
+    @property
+    def edits(self) -> int:
+        """Сколько правок своих сообщений сделал бот."""
+        return sum(len(sent.edits) for sent in self.sent)
+
+
+def test_first_message_is_answered_immediately():
+    """Первая реплика получает ответ сразу, без окна ожидания.
+
+    Прежний буфер ждал две секунды тишины: каждый одиночный вопрос
+    задерживался на столько же.
+    """
+    pytest.importorskip("telegram")
+
+    chat = _Dialog(80).says("Как проверить баланс?")
+
+    assert len(chat.sent) == 1
+    assert chat.edits == 0
+    assert entry_by_id(1).answer_ru in chat.last
+
+
+def test_a_long_kyrgyz_pause_is_still_one_thought():
+    """Тот самый дефект: пауза внутри мысли больше прежних двух секунд.
+
+    Живой тест: абонент печатал кыргызский текст с телефона, пауза между
+    репликами одной мысли оказалась больше окна склейки, и бот вклинился
+    на середине. Теперь ответ уже на экране и просто дозревает: второе
+    сообщение в чат не приходит, прежнее переписывается.
+    """
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(81, clock)
+
+    chat.says("салам алейкум")
+    clock.advance(4.0)
+    chat.says("менин интернетим иштебей жатат")
+
+    assert len(chat.sent) == 1
+    assert chat.edits == 1
+    assert entry_by_id(3).answer_ky in chat.last
+
+
+def test_the_answer_is_recounted_on_the_joined_text():
+    """Ответ пересчитывается по склеенному тексту, а не по последней части."""
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(82, clock)
+
+    chat.says("крч проблема такая")
+    clock.advance(3.5)
+    chat.says("типа сигнал есть")
+    clock.advance(3.5)
+    chat.says("но инета нет")
+
+    assert len(chat.sent) == 1
+    assert chat.edits == 2
+    assert entry_by_id(3).answer_ru in chat.last
+
+
+def test_revision_is_marked_so_it_is_not_missed():
+    """Правка сообщения выше незаметна, поэтому бот помечает её строкой."""
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(83, clock)
+
+    chat.says("интернет")
+    clock.advance(2.0)
+    chat.says("не работает")
+
+    assert "учёл ваше уточнение" in chat.last
+
+
+def test_a_message_after_the_window_is_a_new_message():
+    """Реплика после окна дозревания — это новый вопрос и новое сообщение."""
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(84, clock)
+
+    chat.says("Как проверить баланс?")
+    clock.advance(bot.conversation().revise_window + 1)
+    chat.says("Как сменить тариф?")
+
+    assert len(chat.sent) == 2
+    assert chat.edits == 0
+    assert entry_by_id(1).answer_ru in chat.messages[0]
+    assert entry_by_id(5).answer_ru in chat.messages[1]
+
+
+def test_the_revision_window_comes_from_the_rules():
+    """Окна заданы конфигом и лежат в обещанных пределах."""
+    limits = presentation.rules().limits
+
+    assert 8.0 <= limits.revise_window_seconds <= 10.0
+    assert 0 < limits.read_seconds < limits.revise_window_seconds
+    assert bot.ConversationFlow().revise_window == limits.revise_window_seconds
+    assert bot.ConversationFlow().read_seconds == limits.read_seconds
+
+
+def test_revisions_are_limited_so_the_chat_does_not_freeze():
+    """Бесконечно переписывать одно сообщение нельзя.
+
+    Иначе чат, в который пишут без остановки, навсегда остался бы с
+    одним сообщением, а ограничитель флуда ничего бы не считал.
+    """
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(85, clock)
+    limit = bot.conversation().max_revisions
+
+    for _ in range(limit + 2):
+        chat.says("интернет")
+        clock.advance(1.0)
+
+    assert len(chat.sent) == 2
+    assert chat.edits == limit
+
+
+def test_revisions_do_not_eat_the_flood_budget():
+    """Дописка — не новая реплика: бюджет ограничителя она не тратит.
+
+    Человек, пишущий мысль пятью сообщениями, иначе заглушил бы сам
+    себя и остался бы без ответа вовсе.
+    """
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    bot._throttle = bot.ThrottleGuard(limit=2, window=600)
+    chat = _Dialog(86, clock)
+
+    for part in ("у меня", "не работает", "мобильный", "интернет", "совсем"):
+        chat.says(part)
+        clock.advance(1.0)
+
+    assert len(chat.sent) == 1
+    assert "Слишком много сообщений" not in chat.last
+    assert entry_by_id(3).answer_ru in chat.last
+
+
+def test_a_revised_answer_stays_one_turn_in_the_dialog_memory():
+    """Одна мысль — одна реплика в памяти диалога, сколько бы частей ни было.
+
+    Иначе вопрос, набранный тремя сообщениями, вытеснил бы из короткой
+    памяти всю историю чата и трижды продлил бы цепочку отказов.
+    """
+    pytest.importorskip("telegram")
+    from faq_bot.answer import MEMORY
+
+    clock = _Clock()
+    chat = _Dialog(87, clock)
+
+    chat.says("Как подключить роуминг?")
+    clock.advance(2.0)
+    chat.says("а сколько стоит")
+
+    assert len(MEMORY.turns(87)) == 1
+    assert MEMORY.recent_topic(87) == 4
+    assert entry_by_id(4).answer_ru in chat.last
+
+
+def test_three_unanswerable_parts_do_not_summon_the_operator():
+    """Цепочка отказов считает мысли, а не сообщения.
+
+    Три части одной непонятной мысли — это один отказ, а не три, и
+    предлагать оператора на первой же мысли бот не должен.
+    """
+    pytest.importorskip("telegram")
+    from faq_bot.answer import MEMORY
+
+    clock = _Clock()
+    chat = _Dialog(88, clock)
+
+    chat.says("какая погода")
+    clock.advance(1.0)
+    chat.says("будет в бишкеке")
+    clock.advance(1.0)
+    chat.says("в субботу")
+
+    assert MEMORY.misses(88) == 1
+    assert "не понимаю вопрос" not in chat.last
+
+
+def test_failed_edit_falls_back_to_a_new_message():
+    """Переписать нечего (сообщение удалили) — отвечаем новым, а не молчим."""
+    telegram = pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(89, clock)
+    chat.says("интернет")
+    chat.edit_error.append(
+        telegram.error.BadRequest("Message to edit not found"))
+
+    clock.advance(1.0)
+    chat.says("не работает")
+
+    assert len(chat.sent) == 2
+    assert entry_by_id(3).answer_ru in chat.last
+
+
+def test_pressing_a_button_closes_the_revision_window():
+    """Нажали кнопку — ответ прочитан, дописывать к нему нечего."""
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(90, clock)
+    chat.says("Как проверить баланс?")
+
+    _press(90, "menu")
+    clock.advance(1.0)
+    chat.says("Как сменить тариф?")
+
+    assert len(chat.sent) == 2
+    assert entry_by_id(5).answer_ru in chat.last
+
+
+def test_the_flow_does_not_mix_chats():
+    """Реплики разных чатов не склеиваются между собой."""
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    first = _Dialog(91, clock)
+    second = _Dialog(92, clock)      # тот же процесс, другой chat_id
+
+    first.says("не работает интернет")
+    second.says("как сменить тариф")
+
+    assert entry_by_id(3).answer_ru in first.last
+    assert entry_by_id(5).answer_ru in second.last
+    assert first.edits == 0 and second.edits == 0
+
+
+def test_pasted_text_split_by_telegram_does_not_flood_the_chat():
+    """Живой тест: Telegram разрезал вставленный текст на семь частей.
+
+    Части дозревают в одном сообщении, склеенный текст оказывается
+    длиннее порога — и абонент видит одну вежливую просьбу написать
+    короче вместо семи красных карточек. Седьмая часть упирается в
+    предел числа правок, поэтому сообщений не одно, а два — но не семь.
+    """
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(93, clock)
+    part = "Здравствуйте, расскажу свою ситуацию по порядку. " * 4
+
+    for _ in range(7):
+        chat.says(part)
+        clock.advance(0.5)
+
+    assert len(chat.sent) <= 2
+    assert "слишком длинное" in chat.last
+
+
+def test_throttled_chat_gets_one_warning_and_then_silence():
+    """Заглушённый троттлингом чат получает предупреждение и тишину."""
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    bot._throttle = bot.ThrottleGuard(limit=1, window=600)
+    chat = _Dialog(94, clock)
+
+    chat.says("Как проверить баланс?")
+    clock.advance(30.0)
+    chat.says("Как пополнить счёт?")
+    clock.advance(30.0)
+    chat.says("Как сменить тариф?")
+
+    assert len(chat.sent) == 2
+    assert "Слишком много сообщений" in chat.messages[1]
+
+
+def test_merging_does_not_depend_on_job_queue():
+    """Дозревание живёт на правке сообщений, а не на планировщике.
+
+    В установленной версии python-telegram-bot `application.job_queue`
+    равен None: планировщик живёт в отдельном дополнении
+    (`pip install "python-telegram-bot[job-queue]"`). Прежняя склейка
+    держалась на отложенной задаче; теперь отложенного нет вовсе —
+    ответ уходит сразу и правится на месте.
+    """
+    pytest.importorskip("telegram")
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        application = bot.build_application(
+            "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        assert application.job_queue is None
+
+    clock = _Clock()
+    chat = _Dialog(95, clock)
+    chat.says("не работает")
+    clock.advance(1.0)
+    chat.says("интернет")
+
+    assert len(chat.sent) == 1
+    assert chat.edits == 1
+
+
+# --------------------------------------------------------------------------
+# Дефект 1: «этот совет не помог» — повторять ответ нельзя
+# --------------------------------------------------------------------------
+
+def test_live_kyrgyz_refusal_does_not_repeat_the_same_answer():
+    """Дословный разбор живого теста на кыргызском.
+
+    23:32 «салам алейкум. менин интернетим чето жаман иштеп жатат»
+          — карточка «Эмне үчүн интернет иштебейт?»
+    23:33 «гб бар экен, бирок баары бир иштебей жатат»
+          — и бот повторил ту же карточку слово в слово.
+
+    Теперь второй реплики с тем же текстом не бывает: бот признаёт, что
+    совет не помог, и показывает другие темы.
+    """
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(100, clock)
+
+    chat.says("салам алейкум. менин интернетим чето жаман иштеп жатат")
+    first = chat.last
+    clock.advance(60.0)
+    chat.says("гб бар экен, бирок баары бир иштебей жатат")
+
+    assert entry_by_id(3).answer_ky in first
+    assert entry_by_id(3).answer_ky not in chat.last
+    assert "жардам бербеди" in chat.last
+    assert len(chat.sent) == 2
+
+
+def test_refusal_offers_other_topics_and_an_operator():
+    """На отказ — другие темы кнопками и живой оператор."""
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_text("почему не работает интернет", 101)
+    clock.advance(60.0)
+    screen = bot.screen_for_text("не помогло", 101)
+    actions = screen.actions()
+    topics = [action for action in actions if action.startswith("faq:")]
+
+    assert "operator" in actions
+    assert 1 <= len(topics) <= config.TOP_K
+    assert "faq:3" not in topics            # то, что не помогло, не предлагаем
+    assert "faq:10" in topics               # APN — следующий вопрос оператора
+
+
+def test_second_refusal_hands_the_dialog_to_a_human():
+    """Третье касание той же темы — сразу оператор, без новых советов."""
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_text("почему не работает интернет", 102)
+    clock.advance(30.0)
+    bot.screen_for_text("не помогло", 102)
+    clock.advance(30.0)
+    screen = bot.screen_for_text("всё равно не работает", 102)
+    rendered = _text(screen)
+
+    assert entry_by_id(14).answer_ru in rendered
+    assert "Совет не помог" in rendered
+    assert "Больше советов по этой теме" in rendered
+    reasons = dict(stats_snapshot().operator_reasons)
+    assert reasons.get("not_helping") == 1
+
+
+def test_the_same_topic_twice_in_a_row_is_a_refusal_without_words():
+    """Повтор темы — сигнал сам по себе, даже без слов отказа.
+
+    Живой оператор не зачитывает одну и ту же инструкцию дважды.
+    """
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    first = _text(bot.screen_for_text("почему не работает интернет", 103))
+    clock.advance(40.0)
+    second = _text(bot.screen_for_text("интернет не работает у меня", 103))
+
+    assert entry_by_id(3).answer_ru in first
+    assert entry_by_id(3).answer_ru not in second
+    assert "жардам" not in second            # и не на чужом языке
+    assert "Может быть, дело в этом" in second
+
+
+def test_the_same_topic_after_the_window_is_answered_again():
+    """Через окно повтора тот же вопрос снова получает обычный ответ.
+
+    Иначе абонент, которому утром не помог совет про интернет, вечером
+    не получил бы ответа про интернет вообще.
+    """
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_text("почему не работает интернет", 104)
+    clock.advance(bot.conversation().repeat_window + 10)
+    rendered = _text(bot.screen_for_text("почему не работает интернет", 104))
+
+    assert entry_by_id(3).answer_ru in rendered
+
+
+def test_a_topic_chosen_by_button_twice_is_not_a_refusal():
+    """Абонент сам нажал тему — повторять его выбор не ошибка бота."""
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_action("faq:3", 105)
+    clock.advance(20.0)
+    rendered = _text(bot.screen_for_text("почему не работает интернет", 105))
+
+    assert entry_by_id(3).answer_ru in rendered
+
+
+def test_refusal_words_with_a_new_question_answer_the_new_question():
+    """«Не помогло, а как пополнить счёт?» — это новый вопрос, а не отказ.
+
+    Слишком жадное распознавание отказа испортило бы обычные вопросы,
+    которых в проверке в восемь раз больше, чем диалогов.
+    """
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_text("почему не работает интернет", 106)
+    clock.advance(30.0)
+    rendered = _text(bot.screen_for_text("не помогло, а как пополнить счёт?",
+                                         106))
+
+    assert entry_by_id(11).answer_ru in rendered
+
+
+def test_refusal_words_without_a_previous_answer_are_just_a_question():
+    """Первой репликой «не работает» — обычный вопрос: отвергать нечего."""
+    bot._flow = bot.ConversationFlow()
+
+    rendered = _text(bot.screen_for_text("интернет не работает", 107))
+
+    assert entry_by_id(3).answer_ru in rendered
+
+
+def test_a_refusal_while_the_answer_is_unread_is_a_revision():
+    """Граница «дописка или отказ»: ответ ещё не успели прочитать.
+
+    Абонент дописывает «баары бир иштебей жатат» к своему же вопросу —
+    он печатал, когда ответ появился. Это уточнение: ответ
+    пересчитывается и переписывает прежний.
+    """
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(108, clock)
+
+    chat.says("интернетим иштебейт")
+    clock.advance(1.0)                       # меньше времени на чтение
+    chat.says("баары бир иштебей жатат")
+
+    assert len(chat.sent) == 1               # переписали, а не ответили
+    assert chat.edits == 1
+    assert "жардам бербеди" not in chat.last
+
+
+def test_a_refusal_after_reading_is_a_refusal():
+    """Та же фраза после прочтения ответа — уже отказ, а не дописка."""
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(109, clock)
+
+    chat.says("интернетим иштебейт")
+    clock.advance(bot.conversation().read_seconds + 1.0)
+    chat.says("баары бир иштебей жатат")
+
+    assert len(chat.sent) == 2               # новая реплика, новый ответ
+    assert "жардам бербеди" in chat.last
+
+
+def test_ack_closes_the_refusal_chain():
+    """«Понятно» означает «совет подошёл»: цепочка отказов забыта."""
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_text("почему не работает интернет", 110)
+    clock.advance(30.0)
+    bot.screen_for_text("не помогло", 110)
+    bot.screen_for_action("ack:10", 110)
+    clock.advance(10.0)
+    rendered = _text(bot.screen_for_text("почему не работает интернет", 110))
+
+    assert entry_by_id(3).answer_ru in rendered
+
+
+def test_a_rejected_topic_is_not_offered_again():
+    """Тему, про которую сказали «не помогло», бот второй раз не советует."""
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_text("почему не работает интернет", 111)
+    clock.advance(30.0)
+    screen = bot.screen_for_text("не помогло", 111)
+    offered = [action for action in screen.actions()
+               if action.startswith("faq:")]
+
+    assert bot.conversation().rejected(111) == (3,)
+    assert "faq:3" not in offered
+
+
+def test_refusal_speaks_the_language_of_the_chat():
+    """Экран отказа печатается на одном языке, как и всё остальное."""
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_text("интернетим иштебейт", 112)
+    clock.advance(30.0)
+    rendered = _text(bot.screen_for_text("баары бир иштебей жатат", 112))
+
+    assert "Балким, себеби ушунда" in rendered
+    assert "Может быть" not in rendered
+
+
+def test_refusal_state_does_not_leak_between_chats():
+    """Отказы одного чата не видны другому."""
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_text("почему не работает интернет", 113)
+    clock.advance(30.0)
+    bot.screen_for_text("не помогло", 113)
+    rendered = _text(bot.screen_for_text("почему не работает интернет", 114))
+
+    assert bot.conversation().rejected(114) == ()
+    assert entry_by_id(3).answer_ru in rendered
+
+
+def test_refusal_words_are_configured_in_the_rules():
+    """Слова отказа лежат в bot_rules.json, а не в коде."""
+    phrases = presentation.rules().refusal.phrases
+
+    assert "баары бир" in phrases
+    assert "не помогло" in phrases
+    assert presentation.says_refusal("гб бар экен, бирок баары бир иштебей")
+    assert presentation.says_refusal("уже проверил, всё равно нет")
+    assert not presentation.says_refusal("Как проверить баланс?")
+    assert not presentation.says_refusal("менин интернетим жаман иштеп жатат")
+
+
+# --------------------------------------------------------------------------
+# Голосовые сообщения
+# --------------------------------------------------------------------------
+
+def _fake_speech(monkeypatch, status: str = "ok", text: str = "",
+                 seen: list[dict] | None = None):
+    """Подменить распознавание. Настоящий API в тестах не вызывается:
+    ключ оплачивает человек, а в CI его нет вовсе."""
+    from faq_bot import speech
+
+    def transcribe(path, *, chat_id=None, declared_seconds=0.0,
+                   model=speech.DEFAULT_MODEL):
+        if seen is not None:
+            seen.append({"path": str(path),
+                         "exists": Path(path).exists(),
+                         "chat_id": chat_id,
+                         "declared_seconds": declared_seconds})
+        return speech.Transcript(status, text=text, seconds=declared_seconds)
+
+    monkeypatch.setattr(speech, "transcribe", transcribe)
+    return speech
+
+
+def test_voice_is_answered_through_the_usual_path(monkeypatch):
+    """Распознанный текст идёт тем же путём, что набранный руками."""
+    pytest.importorskip("telegram")
+    _fake_speech(monkeypatch, "ok", "балансты кантип текшерем")
+    chat = _Dialog(120)
+
+    chat.sends_voice(_FakeVoice(duration=4))
+
+    assert len(chat.sent) == 1               # одно сообщение, как на текст
+    assert entry_by_id(1).answer_ky in chat.last
+
+
+def test_voice_shows_what_was_heard(monkeypatch):
+    """Эхо услышанного: иначе непонятно, почему ответ мимо."""
+    pytest.importorskip("telegram")
+    _fake_speech(monkeypatch, "ok", "как пополнить счёт")
+    chat = _Dialog(121)
+
+    chat.sends_voice(_FakeVoice())
+
+    assert "🎤" in chat.last
+    assert "как пополнить счёт" in chat.last
+    assert entry_by_id(11).answer_ru in chat.last
+
+
+def test_voice_message_is_edited_not_doubled(monkeypatch):
+    """Сообщение «слушаю запись» переписывается ответом, а не дополняется."""
+    pytest.importorskip("telegram")
+    _fake_speech(monkeypatch, "ok", "как проверить баланс")
+    chat = _Dialog(122)
+
+    chat.sends_voice(_FakeVoice())
+
+    assert len(chat.sent) == 1
+    assert chat.edits == 1
+    assert "Слушаю запись" not in chat.last
+
+
+@pytest.mark.parametrize("status, expected", [
+    ("too_long", "слишком длинная"),
+    ("rate_limited", "слишком много"),
+    ("no_key", "недоступно"),
+    ("nothing", "Не расслышал"),
+    ("failed", "Не расслышал"),
+])
+def test_every_voice_failure_gets_an_honest_answer(monkeypatch, status,
+                                                   expected):
+    """Каждый статус распознавания объяснён абоненту, и на двух языках."""
+    pytest.importorskip("telegram")
+    _fake_speech(monkeypatch, status)
+    chat = _Dialog(123)
+
+    chat.sends_voice(_FakeVoice(duration=90))
+
+    assert expected in chat.last
+    assert len(chat.sent) == 1
+
+
+def test_voice_texts_exist_in_both_languages():
+    """Тексты про голос живут в конфиге и переведены оба."""
+    messages = presentation.rules().messages
+    names = ["voice_listening", "voice_too_long", "voice_rate_limited",
+             "voice_no_key", "voice_nothing"]
+
+    for name in names:
+        for language in config.LANGUAGES:
+            assert messages[name][language], (name, language)
+    assert set(bot.VOICE_NOTICES.values()) <= set(names)
+
+
+def test_voice_file_is_deleted_after_recognition(monkeypatch):
+    """Голос абонента не остаётся на диске сервера."""
+    pytest.importorskip("telegram")
+    seen: list[dict] = []
+    _fake_speech(monkeypatch, "ok", "как проверить баланс", seen)
+    voice = _FakeVoice(duration=7)
+
+    _Dialog(124).sends_voice(voice)
+
+    assert len(seen) == 1
+    assert seen[0]["exists"]                      # файл был на месте
+    assert seen[0]["declared_seconds"] == 7       # длительность — из Telegram
+    assert seen[0]["chat_id"] == "124"
+    assert not Path(seen[0]["path"]).exists()     # и удалён после
+    assert not Path(voice.saved[0]).parent.exists()
+
+
+def test_voice_survives_a_download_failure(monkeypatch):
+    """Упавшая загрузка не роняет бота и не молчит."""
+    pytest.importorskip("telegram")
+    _fake_speech(monkeypatch, "ok", "как проверить баланс")
+
+    class _Broken(_FakeVoice):
+        async def get_file(self):
+            raise RuntimeError("сеть")
+
+    chat = _Dialog(125).sends_voice(_Broken())
+
+    assert "Не расслышал" in chat.last
+
+
+def test_voice_obeys_the_throttle_before_spending_money(monkeypatch):
+    """Ограничитель срабатывает ДО распознавания: оно платное.
+
+    Проверка идёт по числу обращений к распознаванию, а не по тексту
+    ответа: заглушённый чат не должен стоить владельцу ключа ни секунды.
+    """
+    pytest.importorskip("telegram")
+    seen: list[dict] = []
+    _fake_speech(monkeypatch, "ok", "как проверить баланс", seen)
+    bot._throttle = bot.ThrottleGuard(limit=1, window=600)
+    chat = _Dialog(126)
+
+    chat.sends_voice(_FakeVoice())
+    chat.sends_voice(_FakeVoice())
+    chat.sends_voice(_FakeVoice())
+
+    assert len(seen) == 1
+    assert "Слишком много сообщений" in chat.messages[1]
+    assert len(chat.sent) == 2                    # третье — молчание
+
+
+def test_voice_does_not_count_twice_against_the_throttle(monkeypatch):
+    """Голосовое тратит один ответ бюджета, а не два."""
+    pytest.importorskip("telegram")
+    _fake_speech(monkeypatch, "ok", "как проверить баланс")
+    bot._throttle = bot.ThrottleGuard(limit=2, window=600)
+    chat = _Dialog(127)
+
+    chat.sends_voice(_FakeVoice())
+    chat.sends_voice(_FakeVoice())
+
+    assert len(chat.sent) == 2
+    assert all("Слишком много" not in text for text in chat.messages)
+
+
+def test_voice_limits_are_not_weakened():
+    """Защиты от трат остались такими, какими их написал speech.py."""
+    from faq_bot import speech
+
+    assert speech.MAX_AUDIO_SECONDS == 60.0
+    assert speech.BUDGET_PER_CHAT_HOUR == 180.0
+    assert speech.BUDGET_TOTAL_HOUR == 900.0
+    assert speech.BUDGET_TOTAL_DAY == 3600.0
+    assert speech.DEFAULT_MODEL.endswith("flash-lite-latest")
+
+
+def test_speech_is_imported_lazily(monkeypatch):
+    """Модуль распознавания не нужен ни `answer()`, ни импорту бота.
+
+    `monkeypatch.delitem` вместо `sys.modules.pop`: иначе в процессе
+    осталось бы два экземпляра пакета, и соседние тесты сбрасывали бы
+    статистику не того.
+    """
+    for name in [item for item in sys.modules
+                 if item.startswith(("faq_bot", "telegram"))]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    importlib.import_module("faq_bot.bot")
+
+    assert "faq_bot.speech" not in sys.modules
+
+
+def test_voice_handler_is_registered():
+    """Голосовые действительно подключены к приложению Telegram."""
+    telegram = pytest.importorskip("telegram")
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        application = bot.build_application(
+            "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+    handlers = application.handlers[0]
+    voice = [item for item in handlers
+             if getattr(item, "callback", None) is bot._on_voice]
+    assert len(voice) == 1
+    assert isinstance(voice[0], telegram.ext.MessageHandler)
 
 
 class _FakeQuery:
@@ -248,108 +1008,6 @@ def _press(chat_id: int, action: str,
     asyncio.run(bot._on_button(_FakeButtonUpdate(chat_id, query), None))
     return query
 
-
-def _run_handler(chat_id: int, texts: list[str],
-                 window: float = 0.05) -> list[str]:
-    """Прогнать реплики через настоящий обработчик бота."""
-    bot._buffer = bot.MessageBuffer(window=window)
-    updates = [_FakeUpdate(chat_id, text) for text in texts]
-
-    async def scenario() -> None:
-        for update in updates:
-            await bot._on_text(update, None)
-        await bot.buffer().drain()
-
-    asyncio.run(scenario())
-    return [reply for update in updates
-            for reply in update.effective_message.replies]
-
-
-def test_handler_answers_once_for_three_messages():
-    """Сквозная проверка: три реплики в окне — одно сообщение в чат."""
-    pytest.importorskip("telegram")
-
-    replies = _run_handler(51, ["привет",
-                                "у меня там не работает интернет",
-                                "можете сказать что случилось"])
-
-    assert len(replies) == 1
-    assert entry_by_id(3).answer_ru in replies[0]
-
-
-def test_handler_answers_once_for_a_single_message():
-    """Одна реплика — один ответ, как и раньше."""
-    pytest.importorskip("telegram")
-
-    replies = _run_handler(52, ["Как проверить баланс?"])
-
-    assert len(replies) == 1
-    assert entry_by_id(1).answer_ru in replies[0]
-
-
-def test_pasted_text_split_by_telegram_gets_one_polite_reply():
-    """Тот самый дефект: Telegram разрезал вставленный текст на семь частей.
-
-    Части склеиваются в один текст, он оказывается длиннее порога — и
-    абонент получает одну вежливую просьбу написать короче вместо семи
-    красных карточек.
-    """
-    pytest.importorskip("telegram")
-    part = "Здравствуйте, расскажу свою ситуацию по порядку. " * 4
-
-    replies = _run_handler(54, [part] * 7)
-
-    assert len(replies) == 1
-    assert "слишком длинное" in replies[0]
-
-
-def test_handler_keeps_silence_when_throttled():
-    """Заглушённый троттлингом чат не получает ничего."""
-    pytest.importorskip("telegram")
-    bot._throttle = bot.ThrottleGuard(limit=1, window=10)
-
-    first = _run_handler(53, ["Как проверить баланс?"])
-    second = _run_handler(53, ["Как пополнить счёт?"])
-    third = _run_handler(53, ["Как сменить тариф?"])
-
-    assert len(first) == 1
-    assert "Слишком много сообщений" in second[0]
-    assert third == []
-
-
-def test_sloppy_three_part_question_gets_exactly_one_answer():
-    """Живой тест: «крч проблема такая» / «типа сигнал есть» / «но инета нет».
-
-    Три реплики в окне склейки — ровно один ответ, а не три карточки.
-    """
-    pytest.importorskip("telegram")
-
-    replies = _run_handler(55, ["крч проблема такая",
-                                "типа сигнал есть",
-                                "но инета нет"])
-
-    assert len(replies) == 1
-    assert entry_by_id(3).answer_ru in replies[0]
-
-
-def test_merging_does_not_depend_on_job_queue():
-    """Склейка живёт на asyncio, а не на `job_queue`.
-
-    В установленной версии python-telegram-bot `application.job_queue`
-    равен None: планировщик живёт в отдельном дополнении
-    (`pip install "python-telegram-bot[job-queue]"`). На `job_queue`
-    склейка молча не работала бы именно там, где её проверяют.
-    """
-    pytest.importorskip("telegram")
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        application = bot.build_application(
-            "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-        assert application.job_queue is None
-    assert "job_queue" not in bot.MessageBuffer.push.__doc__.lower()
-    assert len(_run_handler(56, ["не работает", "интернет"])) == 1
 
 
 # --------------------------------------------------------------------------
@@ -617,7 +1275,7 @@ def test_pinned_language_survives_several_messages():
     """Выбор языка держится, а не слетает на следующем сообщении."""
     bot.screen_for_action("lang:ky", 22)
 
-    for text in ("баланс", "*100#", "пакет"):
+    for text in ("баланс", "пакет", "тариф"):
         screen = bot.screen_for_text(text, 22)
         labels = [button.label for button in screen.buttons]
 
@@ -907,3 +1565,81 @@ def test_importing_bot_does_not_pull_telegram(monkeypatch):
     importlib.import_module("faq_bot.bot")
 
     assert not [name for name in sys.modules if name.startswith("telegram")]
+
+
+# --------------------------------------------------------------------------
+# Диалог из ТЗ не должен пострадать от распознавания отказа
+# --------------------------------------------------------------------------
+
+def test_a_clarifying_question_about_the_same_topic_is_answered():
+    """Пункт 4 ТЗ сильнее признака повтора.
+
+    «А сколько стоит?» после вопроса о роуминге — уточнение по той же
+    теме, и абонент обязан получить ответ, а не экран «совет не помог».
+    Пауза заведомо больше окна дозревания: человек прочитал ответ и
+    только потом спросил про цену.
+    """
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_text("Как подключить роуминг?", 130)
+    clock.advance(30.0)
+    rendered = _text(bot.screen_for_text("А сколько стоит?", 130))
+
+    assert entry_by_id(4).answer_ru in rendered
+    assert "не помог" not in rendered
+
+
+def test_the_whole_dialog_example_works_through_the_bot_layer():
+    """Образец организаторов проходит целиком и через слой бота.
+
+    `answer()` его и так проходит, но демонстрируют на защите бота:
+    экран обязан показать ответ темы 4 на обе реплики.
+    """
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+    dialogs = json.loads(
+        config.DIALOGS_PATH.read_text(encoding="utf-8"))
+
+    for dialog in dialogs:
+        for number, turn in enumerate(dialog["turns"]):
+            clock.advance(30.0)
+            rendered = _text(bot.screen_for_text(turn["text"], 131))
+            expected = entry_by_id(turn["faq_id"])
+            assert expected.answer(turn["lang"]) in rendered, (
+                dialog["id"], number, rendered)
+
+
+def test_a_refusal_still_wins_over_an_inherited_topic():
+    """А вот явные слова отказа сильнее наследования темы."""
+    clock = _Clock()
+    bot._flow = bot.ConversationFlow(clock=clock)
+
+    bot.screen_for_text("Как подключить роуминг?", 132)
+    clock.advance(30.0)
+    rendered = _text(bot.screen_for_text("не помогло", 132))
+
+    assert entry_by_id(4).answer_ru not in rendered
+    assert "совет не помог" in rendered.lower()
+
+
+def test_a_long_thought_in_four_parts_stays_one_message():
+    """Окно отсчитывается от последней правки, а не от первого ответа.
+
+    Кыргызский текст с телефона набирается медленно: четыре части по
+    четыре секунды — это пятнадцать секунд одной мысли. При окне,
+    привязанном к первому ответу, мысль разорвалась бы на середине, то
+    есть дефект вернулся бы, только растянутый.
+    """
+    pytest.importorskip("telegram")
+    clock = _Clock()
+    chat = _Dialog(133, clock)
+
+    chat.says("салам")
+    for part in ("менин телефонумда", "интернет жок", "эмне кылсам болот"):
+        clock.advance(4.0)
+        chat.says(part)
+
+    assert len(chat.sent) == 1
+    assert chat.edits == 3
+    assert entry_by_id(3).answer_ky in chat.last

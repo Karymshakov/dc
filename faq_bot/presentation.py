@@ -71,8 +71,13 @@ class Button:
     """Кнопка экрана.
 
     `action` — строка-команда для `bot.py`: `faq:<id>`, `menu`,
-    `section:<n>`, `operator`, `ack`, `another`, `lang:<ru|ky>`, `stats`.
-    Telegram здесь не упоминается намеренно.
+    `section:<n>`, `operator`, `ack:<id>`, `another:<id>`,
+    `lang:<ru|ky>`, `stats`. Telegram здесь не упоминается намеренно.
+
+    Номер темы едет внутри команды, потому что нажатие кнопки
+    переписывает то сообщение, в котором эта кнопка: чтобы «Понятно» не
+    стёрло ответ, а пересобрало ту же карточку, номер нужен прямо здесь,
+    а не в памяти процесса.
     """
 
     label: str
@@ -341,7 +346,9 @@ def ussd_block(codes: Sequence[str],
     return lines
 
 
-def answer_card(reply: Reply) -> Screen:
+def answer_card(reply: Reply, mark: str | None = None,
+                note: str | None = None,
+                rows: tuple[tuple[Button, ...], ...] | None = None) -> Screen:
     """Карточка ответа на языке абонента с учётом светофора уверенности.
 
     🟢 — ответ сразу; 🟡 — ответ и «может быть, вы про это?» с кнопками;
@@ -350,6 +357,11 @@ def answer_card(reply: Reply) -> Screen:
     Второго перевода в карточке нет: ТЗ требует отвечать на языке
     вопроса, а не на двух сразу. Если язык определился неверно, абонент
     нажимает 🇰🇬/🇷🇺 — и эта же карточка перерисовывается на другом языке.
+
+    `mark`, `note` и `rows` нужны «закрытым» видам той же карточки —
+    после «Понятно» и «Другого вопроса». Текст ответа там обязан
+    остаться на экране, поэтому карточка собирается той же функцией, а не
+    заменяется другим экраном: один источник истины, одна разметка.
     """
     if reply.level == "red" or reply.entry is None:
         return not_found_card(reply)
@@ -358,7 +370,7 @@ def answer_card(reply: Reply) -> Screen:
     language = (reply.lang if reply.lang in config.LANGUAGES
                 else config.DEFAULT_LANGUAGE)
     other = other_language(language)
-    mark = LEVEL_MARKS[reply.level]
+    mark = mark or LEVEL_MARKS[reply.level]
 
     lines = [f"{mark} <b>{_esc(entry.question(language))}</b>"]
     if reply.inherited_from_context:
@@ -374,22 +386,33 @@ def answer_card(reply: Reply) -> Screen:
         lines.append("")
         lines.extend(ussd_block(codes, language))
 
-    rows: list[tuple[Button, ...]] = []
+    keyboard: list[tuple[Button, ...]] = []
     others = [item for item in reply.suggestion_entries if item.id != entry.id]
-    if reply.level == "yellow" and others:
+    if reply.level == "yellow" and others and rows is None:
         maybe = _t(language, "может быть, вы про это?",
                    "балким, бул жөнүндөбү?")
         lines.append("")
         lines.append(f"🟡 <i>{_esc(maybe)}</i>")
-        rows.extend(_faq_buttons(others[:config.TOP_K - 1], language))
+        keyboard.extend(_faq_buttons(others[:config.TOP_K - 1], language))
 
-    rows.append((
-        Button(_t(language, "✅ Понятно", "✅ Түшүндүм"), "ack"),
-        Button(_t(language, "✍️ Другой вопрос", "✍️ Башка суроо"), "another"),
+    if note:
+        lines.append("")
+        lines.append(f"<i>{_esc(note)}</i>")
+
+    if rows is not None:
+        return Screen("\n".join(lines), tuple(rows))
+
+    # Адрес темы едет в самих кнопках: так состояние экрана хранится в
+    # кнопке, а не в памяти процесса, и «Понятно» умеет пересобрать эту
+    # же карточку, вместо того чтобы затереть её одной строкой.
+    keyboard.append((
+        Button(_t(language, "✅ Понятно", "✅ Түшүндүм"), f"ack:{entry.id}"),
+        Button(_t(language, "✍️ Другой вопрос", "✍️ Башка суроо"),
+               f"another:{entry.id}"),
     ))
-    rows.append((_menu_button(),
-                 _language_button(language, f"faq:{entry.id}")))
-    return Screen("\n".join(lines), tuple(rows))
+    keyboard.append((_menu_button(),
+                     _language_button(language, f"faq:{entry.id}")))
+    return Screen("\n".join(lines), tuple(keyboard))
 
 
 def not_found_card(reply: Reply) -> Screen:
@@ -425,20 +448,61 @@ def not_found_card(reply: Reply) -> Screen:
     return Screen("\n".join(lines), menu.rows)
 
 
-def acknowledged_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
-    """Экран после кнопки «Понятно»: одна строка, без кнопок и без меню.
+def acknowledged_card(reply: Reply) -> Screen:
+    """«Понятно»: ответ остаётся на экране, уходит только клавиатура.
 
-    Карточка сворачивается в подтверждение прямо на своём месте —
-    нового сообщения не отправляется. Раньше одно касание «Понятно»
-    давало две лишних простыни: короткий ответ и следом полное меню.
+    Нажатие кнопки переписывает то сообщение, в котором эта кнопка, — и
+    раньше «Понятно» затирало этим весь ответ. В живом тесте это
+    выглядело так: вопрос «mende internet jok», а под ним единственная
+    строка «✅ Болду». Ответ был, его стёрло случайное касание, и в
+    истории переписки осталось, будто бот ответил «Болду» на вопрос про
+    интернет.
+
+    Поэтому «Понятно» ничего не стирает: текст темы и ответа остаётся
+    дословно, 🟢 в заголовке меняется на ✅, клавиатура убирается
+    (`reply_markup=None`), и внизу появляется одна строка подтверждения.
+    Видно и сам ответ, и то, что вопрос закрыт.
+    """
+    language = (reply.lang if reply.lang in config.LANGUAGES
+                else config.DEFAULT_LANGUAGE)
+    note = _t(language, "Готово. Будет ещё вопрос — просто напишите.",
+              "Болду. Дагы суроо болсо, жөн эле жазыңыз.")
+    return answer_card(reply, mark="✅", note=note, rows=())
+
+
+def acknowledged_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """Подтверждение без карточки: кнопка пришла из старого сообщения.
+
+    Запасной путь для `ack` без номера темы — например, из сообщения,
+    отправленного прежней версией бота. Пересобрать карточку не из чего,
+    поэтому остаётся одна строка.
     """
     text = _t(language, "✅ Готово. Будет ещё вопрос — просто напишите.",
               "✅ Болду. Дагы суроо болсо, жөн эле жазыңыз.")
     return Screen(text)
 
 
+def another_question_card(reply: Reply) -> Screen:
+    """«Другой вопрос»: ответ остаётся, добавляется подсказка.
+
+    Та же причина, что и у «Понятно»: кнопка переписывает сообщение, и
+    стирать ею готовый ответ нельзя. Абонент может передумать, вернуться
+    к инструкции или просто перечитать её — текст остаётся на месте.
+    Кнопки темы уходят, остаются меню и оператор.
+    """
+    language = (reply.lang if reply.lang in config.LANGUAGES
+                else config.DEFAULT_LANGUAGE)
+    note = _t(language,
+              "✍️ Напишите новый вопрос своими словами — этот ответ "
+              "останется здесь",
+              "✍️ Жаңы сурооңузду өз сөзүңүз менен жазыңыз — бул жооп "
+              "ордунда калат")
+    return answer_card(reply, note=note,
+                       rows=((_menu_button(), _operator_button()),))
+
+
 def another_question_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
-    """Экран после кнопки «Другой вопрос»: контекст темы сброшен.
+    """Экран «новый вопрос» без карточки: /reset и кнопка из старого экрана.
 
     Полного меню здесь нет намеренно: абонент только что сказал, что
     хочет спросить своими словами. Меню — одной кнопкой.
@@ -452,14 +516,19 @@ def another_question_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
 
 def operator_screen(entry: FaqEntry | None,
                     language: str = config.DEFAULT_LANGUAGE,
-                    reason: str | None = None) -> Screen:
+                    reason: str | None = None,
+                    note: str | None = None) -> Screen:
     """Передача оператору: условия берём из faq.json, ничего не выдумываем.
 
     `reason` — код причины из конфига: видно и абоненту, и в /stats.
+    `note` — имя сообщения из конфига, которое объясняет передачу своими
+    словами («больше советов по этой теме у меня нет»).
     """
     lines = ["🧑‍💼 <b>Оператор</b>"]
     if reason:
         lines.append(f"<i>{_esc(reason_label(reason, language))}</i>")
+    if note:
+        lines.append(_esc(message(note, language)))
     if entry is not None:
         lines.append("")
         lines.append(_esc(entry.answer(language)))
@@ -585,8 +654,20 @@ DEFAULT_RULES: Mapping[str, Any] = {
                             "ky": "❓ База сыртындагы суроо"},
             "repeated_miss": {"ru": "🔁 Бот не понял несколько раз подряд",
                               "ky": "🔁 Бот бир нече жолу түшүнбөдү"},
+            "not_helping": {"ru": "🛠 Совет не помог",
+                            "ky": "🛠 Кеңеш жардам бербеди"},
         },
         "repeated_miss_threshold": 3,
+    },
+    "refusal": {
+        "phrases": ("не помог", "не помогло", "всё равно", "все равно",
+                    "уже проверил", "уже сделал", "пробовал",
+                    "не получается", "то же самое",
+                    "баары бир", "жардам берген жок", "кылдым",
+                    "текшердим", "иштебей эле жатат", "болбоду",
+                    "дагы эле"),
+        "repeat_window_seconds": 180.0,
+        "escalate_after": 2,
     },
     "detection": {
         "greeting": ("салам", "саламатсыз", "ассалам", "привет",
@@ -601,7 +682,9 @@ DEFAULT_RULES: Mapping[str, Any] = {
         "max_question_chars": 1000,
         "replies_per_window": 5,
         "window_seconds": 10,
-        "merge_window_seconds": 2.0,
+        "revise_window_seconds": 9.0,
+        "read_seconds": 3.0,
+        "max_revisions": 6,
     },
     "messages": {
         "greeting": {
@@ -637,6 +720,52 @@ DEFAULT_RULES: Mapping[str, Any] = {
             "ru": "Похоже, я не понимаю вопрос. Давайте позову оператора.",
             "ky": "Сурооңузду түшүнбөй жатам окшойт. Операторду чакырайын.",
         },
+        "not_helping": {
+            "ru": "Понял, этот совет не помог. Тогда дело может быть "
+                  "в другом.",
+            "ky": "Түшүндүм, бул кеңеш жардам бербеди. Анда себеби башка "
+                  "нерседе болушу мүмкүн.",
+        },
+        "maybe_this": {
+            "ru": "Может быть, дело в этом:",
+            "ky": "Балким, себеби ушунда:",
+        },
+        "no_more_advice": {
+            "ru": "Больше советов по этой теме у меня нет — передаю "
+                  "оператору.",
+            "ky": "Бул тема боюнча менде башка кеңеш жок — операторго "
+                  "өткөрөм.",
+        },
+        "revised": {
+            "ru": "↻ учёл ваше уточнение",
+            "ky": "↻ тактооңузду эске алдым",
+        },
+        "voice_listening": {
+            "ru": "🎤 Слушаю запись…",
+            "ky": "🎤 Жазууну угуп жатам…",
+        },
+        "voice_too_long": {
+            "ru": "Запись слишком длинная. Скажите короче или напишите "
+                  "текстом.",
+            "ky": "Жазуу өтө узун. Кыскача айтыңыз же текст жазыңыз.",
+        },
+        "voice_rate_limited": {
+            "ru": "Голосовых пока слишком много. Попробуйте позже или "
+                  "напишите вопрос текстом.",
+            "ky": "Үн билдирүүлөр азыр өтө көп болду. Кийинчерээк аракет "
+                  "кылыңыз же текст жазыңыз.",
+        },
+        "voice_no_key": {
+            "ru": "Распознавание голоса недоступно. Напишите вопрос "
+                  "текстом — отвечу так же.",
+            "ky": "Үндү тааныбай жатам. Сурооңузду текст менен жазыңыз — "
+                  "ошол эле жообун берем.",
+        },
+        "voice_nothing": {
+            "ru": "Не расслышал. Повторите, пожалуйста, или напишите "
+                  "текстом.",
+            "ky": "Укпай калдым. Кайталап айтыңыз же текст жазыңыз.",
+        },
         "escalated": {
             "ru": "Такие обращения решает оператор. Инструкция выше, "
                   "обращение я помечаю для человека.",
@@ -661,12 +790,36 @@ DEFAULT_RULES: Mapping[str, Any] = {
 
 @dataclass(frozen=True)
 class Limits:
-    """Пороги защиты от флуда (раздел «limits» конфига)."""
+    """Пороги защиты от флуда и окна разговора (раздел «limits»).
+
+    `revise_window_seconds` — окно дозрения ответа: дописанная в него
+    реплика переписывает последний ответ бота, а не добавляет новый.
+    `read_seconds` — за сколько абонент успевает прочитать ответ; по
+    этому сроку отличается «дописал свою мысль» от «прочитал и говорит,
+    что не помогло».
+    """
 
     max_question_chars: int
     replies_per_window: int
     window_seconds: float
-    merge_window_seconds: float
+    revise_window_seconds: float
+    read_seconds: float
+    max_revisions: int
+
+
+@dataclass(frozen=True)
+class RefusalRules:
+    """Признаки отказа от предыдущего ответа (раздел «refusal»).
+
+    `phrases` — явные слова отказа на обоих языках.
+    `repeat_window_seconds` — окно, в котором повтор одной и той же темы
+    сам по себе считается отказом.
+    `escalate_after` — после какого числа отказов по теме звать человека.
+    """
+
+    phrases: tuple[str, ...]
+    repeat_window_seconds: float
+    escalate_after: int
 
 
 @dataclass(frozen=True)
@@ -692,6 +845,7 @@ class BotRules:
     detection: Mapping[str, tuple[str, ...]]
     messages: Mapping[str, Mapping[str, str]]
     limits: Limits
+    refusal: RefusalRules
     source: str
 
 
@@ -831,9 +985,26 @@ def _build_rules(raw: Any, source: str) -> BotRules:
             default_limits["replies_per_window"])),
         window_seconds=_positive(limits_data.get("window_seconds"),
                                  default_limits["window_seconds"]),
-        merge_window_seconds=_positive(
-            limits_data.get("merge_window_seconds"),
-            default_limits["merge_window_seconds"]),
+        revise_window_seconds=_positive(
+            limits_data.get("revise_window_seconds"),
+            default_limits["revise_window_seconds"]),
+        read_seconds=_positive(limits_data.get("read_seconds"),
+                               default_limits["read_seconds"]),
+        max_revisions=int(_positive(limits_data.get("max_revisions"),
+                                    default_limits["max_revisions"])),
+    )
+
+    refusal_data = data.get("refusal")
+    refusal_data = refusal_data if isinstance(refusal_data, Mapping) else {}
+    default_refusal = DEFAULT_RULES["refusal"]
+    refusal = RefusalRules(
+        phrases=_word_list(refusal_data.get("phrases"),
+                           default_refusal["phrases"]),
+        repeat_window_seconds=_positive(
+            refusal_data.get("repeat_window_seconds"),
+            default_refusal["repeat_window_seconds"]),
+        escalate_after=int(_positive(refusal_data.get("escalate_after"),
+                                     default_refusal["escalate_after"])),
     )
 
     return BotRules(
@@ -842,6 +1013,7 @@ def _build_rules(raw: Any, source: str) -> BotRules:
         messages=_message_pack(data.get("messages"),
                                DEFAULT_RULES["messages"], source),
         limits=limits,
+        refusal=refusal,
         source=source,
     )
 
@@ -1001,6 +1173,23 @@ def detect_intent(text: str) -> str | None:
     return None
 
 
+def says_refusal(text: str) -> bool:
+    """Сказал ли абонент, что предыдущий ответ не помог.
+
+    Только слова, без состояния диалога: решение «это отказ» принимает
+    слой бота, потому что одних слов мало. «Не помогло, а как пополнить
+    счёт?» — это новый вопрос, и отказом он становится лишь тогда, когда
+    новый поиск не нашёл другую тему увереннее.
+
+    Повод для функции — живой тест на кыргызском: на «гб бар экен, бирок
+    баары бир иштебей жатат» бот дословно повторил предыдущий ответ.
+    """
+    if not fold(text):
+        return False
+    return any(matches_pattern(text, pattern)
+               for pattern in rules().refusal.phrases)
+
+
 def operator_reason(text: str) -> str | None:
     """Причина передать диалог человеку или None.
 
@@ -1049,6 +1238,35 @@ def notice_screen(name: str, language: str = config.DEFAULT_LANGUAGE,
     return Screen(text, ((_menu_button(), _operator_button()),))
 
 
+#: До какой длины показывать распознанную речь. Эхо нужно, чтобы абонент
+#: увидел, что именно услышал бот, а не чтобы пересказать запись целиком.
+HEARD_LENGTH: int = 160
+
+
+def listening_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """«Слушаю запись…» — ответ на голосовое, пока идёт распознавание.
+
+    Это сообщение потом переписывается самим ответом, поэтому голосовое
+    добавляет в чат ровно одно сообщение, как и текстовый вопрос.
+    Кнопок нет намеренно: нажимать во время распознавания нечего.
+    """
+    return Screen(_esc(message("voice_listening", language)))
+
+
+def with_heard(screen: Screen, heard: str,
+               language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """Эхо распознанной речи перед ответом.
+
+    Распознавание ошибается, особенно на кыргызском и в шуме. Без эха
+    абонент не поймёт, почему ответ мимо: он сказал «роуминг», а бот
+    услышал «пополнить». Одна строка сверху показывает услышанное — и
+    дальше идёт обычная карточка, без всякой особой логики для голоса.
+    """
+    shown = _short(heard, HEARD_LENGTH)
+    return Screen(f"🎤 <i>«{_esc(shown)}»</i>\n\n{screen.text}",
+                  screen.rows, screen.parse_mode)
+
+
 def language_switched_screen(
         language: str = config.DEFAULT_LANGUAGE) -> Screen:
     """Меню на выбранном языке плюс строка подтверждения.
@@ -1061,6 +1279,57 @@ def language_switched_screen(
     flag = LANGUAGE_FLAGS.get(language, "🌐")
     head = f"{flag} <b>{_esc(message('language_switched', language))}</b>"
     return Screen(f"{head}\n{menu.text}", menu.rows)
+
+
+def alternatives_screen(entries: Sequence[FaqEntry],
+                        language: str = config.DEFAULT_LANGUAGE,
+                        rejected: FaqEntry | None = None) -> Screen:
+    """Другие темы вместо повтора ответа, который не помог.
+
+    Экран сознательно не содержит текста отвергнутой темы: абонент
+    только что сказал, что этот совет не сработал, и видеть его снова —
+    худшее, что может сделать бот. Вместо него — честное признание,
+    название темы, которая не помогла, и до трёх других тем кнопками
+    плюс живой оператор.
+    """
+    if language not in config.LANGUAGES:
+        language = config.DEFAULT_LANGUAGE
+    lines = [f"🔁 <b>{_esc(message('not_helping', language))}</b>"]
+    if rejected is not None:
+        tried = _t(language, "не помогло", "жардам бербеди")
+        lines.append(f"<i>✗ {_esc(rejected.question(language))} — "
+                     f"{_esc(tried)}</i>")
+
+    picked = list(entries)[:config.TOP_K]
+    rows: list[tuple[Button, ...]] = []
+    if picked:
+        lines.append("")
+        lines.append(f"<i>{_esc(message('maybe_this', language))}</i>")
+        for number, entry in enumerate(picked, start=1):
+            lines.append(f"<b>{number}</b>  {_esc(entry.question(language))}")
+        rows.extend(_faq_buttons(picked, language))
+    else:
+        hint = _t(language, "Опишите, что именно не получается",
+                  "Эмне болбой жатканын жазыңыз")
+        lines.append("")
+        lines.append(f"<i>{_esc(hint)}</i>")
+
+    rows.append((_menu_button(), _operator_button()))
+    return Screen("\n".join(lines), tuple(rows))
+
+
+def with_revision_note(screen: Screen,
+                       language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """Пометить ответ, пересчитанный по дописанной реплике.
+
+    Правка сообщения, которое уже уехало вверх по переписке, незаметна:
+    Telegram показывает лишь мелкую метку «изменено». Одна строка внизу
+    говорит, что бот учёл дописанное, — и заодно гарантирует, что текст
+    действительно изменился, иначе Telegram отклонил бы правку.
+    """
+    note = message("revised", language)
+    return Screen(f"{screen.text}\n\n<i>{_esc(note)}</i>",
+                  screen.rows, screen.parse_mode)
 
 
 def with_operator_offer(screen: Screen,

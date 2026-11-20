@@ -98,6 +98,11 @@ class StatsCollector:
         self._answered = 0
         self._unanswered_total = 0
         self._by_language: Counter[str] = Counter()
+        # Короткая история учтённых вопросов: (язык, нашлась ли тема).
+        # Нужна, чтобы `rollback` знал, какой счётчик уменьшать. Именно
+        # история, а не последнее значение: дозревание ответа отменяет
+        # несколько записей подряд, и одного поля на это не хватает.
+        self._history: deque[tuple[str, bool]] = deque(maxlen=64)
         self._chats: set[str] = set()
         self._operator_reasons: Counter[str] = Counter()
 
@@ -117,7 +122,9 @@ class StatsCollector:
             self._chats.add(_fingerprint(chat_id))
         if faq_id is not None:
             self._answered += 1
+            self._history.append((lang, True))
             return
+        self._history.append((lang, False))
         self._unanswered_total += 1
         self._unanswered.append(UnansweredQuestion(
             text=sanitize(text),
@@ -126,6 +133,40 @@ class StatsCollector:
             confidence=float(confidence),
             at=self._clock(),
         ))
+
+    def rollback(self) -> bool:
+        """Отменить последний учтённый вопрос.
+
+        Нужно из-за дозревания ответа: когда абонент дописывает мысль
+        второй и третьей репликой, бот пересчитывает ответ по склеенному
+        тексту и переписывает своё сообщение. Для него это ОДИН вопрос,
+        а `record` к тому моменту успел посчитать каждую часть отдельно.
+
+        Без отмены `/stats` показывал бы втрое больше обращений, чем было,
+        а первая часть незаконченной мысли («крч проблема такая») попадала
+        бы в примеры неотвеченных — хотя абонент в итоге получил ответ.
+
+        Симметрично `DialogMemory.rollback()`, который по той же причине
+        убирает дописку из памяти диалога.
+
+        Возвращает True, если было что отменять.
+        """
+        if not self._history:
+            return False
+
+        language, answered = self._history.pop()
+        self._total = max(0, self._total - 1)
+        self._by_language[language] -= 1
+        if self._by_language[language] <= 0:
+            del self._by_language[language]
+
+        if answered:
+            self._answered = max(0, self._answered - 1)
+        else:
+            self._unanswered_total = max(0, self._unanswered_total - 1)
+            if self._unanswered:
+                self._unanswered.pop()
+        return True
 
     def record_operator(self, reason: str,
                         chat_id: int | str | None = None) -> None:

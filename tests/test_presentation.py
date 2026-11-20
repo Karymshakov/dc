@@ -160,7 +160,12 @@ def _screens(language: str) -> list[Screen]:
         presentation.answer_card(make_reply(1, language=language)),
         presentation.answer_card(rejected_reply(language)),
         presentation.acknowledged_screen(language),
+        presentation.acknowledged_card(make_reply(1, language=language)),
         presentation.another_question_screen(language),
+        presentation.another_question_card(make_reply(1, language=language)),
+        presentation.alternatives_screen(
+            [entry_by_id(2), entry_by_id(10)], language, entry_by_id(3)),
+        presentation.listening_screen(language),
         presentation.help_screen(language),
         presentation.operator_screen(entry_by_id(14), language,
                                      "direct_request"),
@@ -287,8 +292,36 @@ def test_card_language_button_redraws_the_same_card():
     assert actions == ["lang:ru:faq:4"]
 
 
-def test_card_after_ack_collapses_into_one_line():
-    """«Понятно» сворачивает карточку в одну строку без кнопок и меню."""
+def test_ack_keeps_the_answer_and_drops_only_the_keyboard():
+    """«Понятно» сохраняет ответ: стирать его нажатием кнопки нельзя.
+
+    Дефект живого теста: нажатие ✅ переписывало карточку одной строкой
+    «✅ Болду», и ответ про интернет исчезал из переписки — в истории
+    оставалось, будто бот ответил «Болду» на вопрос про интернет.
+    """
+    entry = entry_by_id(3)
+    screen = presentation.acknowledged_card(make_reply(3))
+    text = presentation.plain_text(screen)
+
+    assert entry.answer_ru in text              # ответ остался дословно
+    assert entry.question_ru in text            # и тема тоже
+    assert text.startswith("✅")                 # вопрос закрыт
+    assert screen.rows == ()                    # клавиатуры больше нет
+    assert "просто напишите" in text
+
+
+def test_another_question_keeps_the_answer_too():
+    """«Другой вопрос» тоже не стирает ответ — по той же причине."""
+    screen = presentation.another_question_card(make_reply(3))
+    text = presentation.plain_text(screen)
+
+    assert entry_by_id(3).answer_ru in text
+    assert "останется здесь" in text
+    assert screen.actions() == ("menu", "operator")
+
+
+def test_ack_without_a_topic_number_still_answers():
+    """Кнопка из старого сообщения: карточку собрать не из чего."""
     screen = presentation.acknowledged_screen("ru")
 
     assert "\n" not in screen.text
@@ -302,6 +335,9 @@ def test_card_after_ack_collapses_into_one_line():
     (presentation.acknowledged_screen("ru"), 1),
     (presentation.another_question_screen("ru"), 2),
     (presentation.smalltalk_screen("greeting", "ru"), 3),
+    (presentation.acknowledged_card(make_reply(1)), 9),
+    (presentation.alternatives_screen([entry_by_id(2), entry_by_id(10)],
+                                      "ru", entry_by_id(3)), 7),
 ])
 def test_screens_stay_short(screen, limit):
     """Карточка и служебные экраны держатся в границах по числу строк.
@@ -352,7 +388,9 @@ def test_green_light_answers_immediately():
 
     assert screen.text.startswith("🟢")
     assert entry_by_id(1).answer_ru in screen.text
-    assert "ack" in screen.actions()
+    # Номер темы едет в самой кнопке: «Понятно» пересобирает эту же
+    # карточку, а не затирает её одной строкой.
+    assert "ack:1" in screen.actions()
     assert not [action for action in screen.actions()
                 if action.startswith("faq:")]
 
@@ -433,17 +471,18 @@ def test_another_question_button_resets_topic():
     from faq_bot.answer import MEMORY
 
     MEMORY.remember(7, 4, 0.9)
-    screen = bot.screen_for_action("another", 7)
+    screen = bot.screen_for_action("another:4", 7)
     text = presentation.plain_text(screen)
 
     assert MEMORY.recent_topic(7) is None
-    assert "Новый вопрос" in text
+    assert entry_by_id(4).answer_ru in text      # ответ при этом остался
     assert "menu" in screen.actions()
     assert not [action for action in screen.actions()
                 if action.startswith("section:")]
 
 
-@pytest.mark.parametrize("action", ["ack", "another", "faq:1", "section:2"])
+@pytest.mark.parametrize("action", ["ack", "another", "ack:1", "another:1",
+                                    "faq:1", "section:2"])
 def test_menu_is_not_repeated_after_every_button(action):
     """Полное меню приходит по /start, по кнопке «Меню» и при отказе.
 
@@ -485,6 +524,8 @@ def test_all_button_actions_fit_telegram_limit():
     screens = [presentation.menu_screen("ru"),
                presentation.answer_card(make_reply(1, confidence=0.45)),
                presentation.answer_card(rejected_reply()),
+               presentation.alternatives_screen(
+                   [entry_by_id(2), entry_by_id(10)], "ru", entry_by_id(3)),
                presentation.help_screen("ky")]
 
     for screen in screens:

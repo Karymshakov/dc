@@ -15,10 +15,12 @@
 
 Главное правило переписки, из которого следует всё остальное:
 
-* **новый текст абонента** — новое сообщение в чат (`_send()`);
+* **первая реплика мысли** — новое сообщение в чат (`_send()`);
 * **нажатие кнопки** — правка того сообщения, в котором эта кнопка
   (`_edit()` поверх `edit_message_text`), плюс обязательный
-  `answer_callback_query`, чтобы на кнопке не крутились часики.
+  `answer_callback_query`, чтобы на кнопке не крутились часики;
+* **реплика, дописанная к своему же вопросу** — правка прежнего ответа
+  (`_rewrite()`), пересчитанного по склеенному тексту.
 
 До этого каждое касание присылало новое сообщение — «Понятно» давало
 подтверждение и следом полное меню, то есть три сообщения на одно
@@ -29,13 +31,19 @@
 
 * **Защита от флуда.** `ThrottleGuard` ограничивает число ответов на чат
   в окно времени, а слишком длинное сообщение не разбирается как вопрос.
-* **Склейка реплик.** `MessageBuffer` ждёт короткое окно тишины и
-  отвечает один раз на склеенный текст: абонент часто пишет одну мысль
-  тремя сообщениями.
+* **Ход разговора.** `ConversationFlow` отвечает на первую реплику
+  сразу, а дописанные уточнения не присылает отдельными сообщениями, а
+  переписывает ими прежний ответ. Он же помнит, какую тему бот уже
+  показывал, и распознаёт «этот совет не помог»: повторять тот же текст
+  бот не имеет права, он предлагает другие темы и живого оператора.
 * **Приветствия и болтовня.** «салам», «кто ты», «рахмат» получают
   человеческий ответ здесь, до вызова `answer()`. Сама функция
   `answer()` по-прежнему отдаёт на такие реплики `faq_id = null` —
   так требует спецификация, и по ней считается автопроверка.
+* **Голос.** Голосовое сообщение скачивается, распознаётся в
+  `faq_bot.speech` и дальше идёт обычным путём, с эхом услышанного перед
+  карточкой. Пределы длины и бюджеты живут в самом `speech`: ключ
+  оплачивает человек, и этот слой их не ослабляет.
 * **Язык.** Выбор языка кнопкой сохраняется для чата и перебивает
   автоопределение; правило спора описано у `reply_language()`. Экран
   печатается на одном языке, а кнопка 🇰🇬/🇷🇺 перерисовывает его же на
@@ -49,14 +57,19 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
+import tempfile
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import config, presentation
 from .answer import (
     MEMORY,
     STATS,
+    Reply,
     all_entries,
     detect_language,
     entry_by_id,
@@ -65,6 +78,8 @@ from .answer import (
     respond,
     stats_snapshot,
 )
+from .context import mentions_topic
+from .contracts import FaqEntry
 from .presentation import Screen
 
 logger = logging.getLogger(__name__)
@@ -224,6 +239,7 @@ def forget_chat(chat_id: int | str | None) -> None:
     _chat_language_pinned.discard(key)
     _chat_language_streak.pop(key, None)
     throttle().forget(chat_id)
+    conversation().forget(chat_id)
     reset_context(chat_id)
 
 
@@ -311,132 +327,324 @@ def throttle() -> ThrottleGuard:
 
 
 # --------------------------------------------------------------------------
-# Склейка подряд идущих сообщений
+# Ход разговора: дозревание ответа и отказ от ответа
 # --------------------------------------------------------------------------
 
-class MessageBuffer:
-    """Склейка подряд идущих реплик одного чата в один вопрос.
+@dataclass
+class Pending:
+    """Последний ответ бота в чате — тот, который ещё можно переписать."""
 
-    Абонент пишет одну мысль тремя сообщениями: «привет» / «у меня там
-    не работает интернет» / «можете сказать что случилось». Буфер ждёт
-    окно тишины и отвечает один раз на склеенный текст. Если за окно
-    пришла одна реплика, поведение не меняется — только ответ приходит
-    через `window` секунд.
+    handle: Any                 # сообщение Telegram (всё, что умеет edit_text)
+    parts: list[str]            # реплики, из которых собран вопрос
+    at: float                   # когда ответ ушёл в чат
+    revisions: int = 0
 
-    Почему отложенная задача asyncio, а не `job_queue` из
-    python-telegram-bot: `job_queue` живёт в отдельном дополнении
-    (`pip install "python-telegram-bot[job-queue]"`, APScheduler), и в
-    окружении проекта `application.job_queue` равен None — склейка молча
-    не работала бы именно там, где её проверяют. Задача asyncio работает
-    на голой библиотеке, а сам буфер тестируется вообще без Telegram.
 
-    Планирование, а не ожидание: `push()` не блокирует обработчик.
-    PTB по умолчанию разбирает обновления по одному, и `await sleep()`
-    внутри обработчика задержал бы следующие сообщения — склеивать было
-    бы нечего.
+@dataclass(frozen=True)
+class Served:
+    """Тема, которую бот только что показал в этом чате."""
+
+    faq_id: int
+    at: float
+    source: str                 # "text" — по вопросу, "button" — по кнопке
+
+
+@dataclass(frozen=True)
+class Rejected:
+    """Темы, про которые в этом чате сказали «не помогло»."""
+
+    topics: tuple[int, ...]
+    count: int
+    at: float
+
+
+class ConversationFlow:
+    """Состояние живого разговора: дозревание ответа и отказ от ответа.
+
+    Две задачи, обе из живого теста на кыргызском.
+
+    **Ответ дозревает, а не ждёт.** Раньше бот ждал две секунды тишины и
+    только потом отвечал. Абонент печатал кыргызский текст с телефона,
+    пауза внутри одной мысли оказалась больше двух секунд, и бот
+    вклинился на середине. Просто увеличить окно нельзя: это задержало
+    бы каждый одиночный вопрос на столько же. Поэтому первая реплика
+    получает ответ **сразу**, а реплика, дописанная в окно
+    :attr:`revise_window`, не присылает второе сообщение, а
+    **переписывает** прежний ответ, посчитанный заново по склеенному
+    тексту. Задержки нет, чат не растёт, ответ уточняется на лету — и
+    это тот же принцип «редактировать, а не слать», на котором уже
+    держатся кнопки.
+
+    **Отказ от ответа.** Абонент говорит «баары бир иштебей жатат» —
+    предыдущий совет не сработал. Повторять его дословно нельзя, и для
+    этого нужно помнить, какую тему бот уже показывал (:meth:`serve`) и
+    какие темы абонент уже отверг (:meth:`reject`).
+
+    Где граница между «дописал свою мысль» и «прочитал ответ и говорит,
+    что он не помог». Признака прочтения у Telegram Bot API нет вовсе,
+    поэтому улик две:
+
+    1. **нажатая кнопка** — абонент точно видел ответ, разговор пошёл
+       дальше, переписывать больше нечего (:meth:`close`);
+    2. **время** — :attr:`read_seconds` на то, чтобы прочитать. Слова
+       отказа, пришедшие раньше, это продолжение своего же вопроса
+       (абонент печатал, когда ответ появился); пришедшие позже —
+       реакция на прочитанный ответ.
+
+    Состояние живёт в памяти процесса и ничего не знает про Telegram:
+    сообщение бота хранится как непрозрачный `handle`, поэтому класс
+    тестируется обычными тестами.
     """
 
-    def __init__(self, window: float | None = None) -> None:
-        self._window = window
-        self._parts: dict[str, list[str]] = {}
-        self._tokens: dict[str, int] = {}
-        self._pending: set[asyncio.Task[None]] = set()
+    def __init__(self, revise_window: float | None = None,
+                 read_seconds: float | None = None,
+                 max_revisions: int | None = None,
+                 repeat_window: float | None = None,
+                 escalate_after: int | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._revise_window = revise_window
+        self._read_seconds = read_seconds
+        self._max_revisions = max_revisions
+        self._repeat_window = repeat_window
+        self._escalate_after = escalate_after
+        self._clock = clock
+        self._pending: dict[str, Pending] = {}
+        self._served: dict[str, Served] = {}
+        self._rejected: dict[str, Rejected] = {}
+
+    # --- пороги: явные значения для тестов, иначе из bot_rules.json ------
 
     @property
-    def window(self) -> float:
-        """Окно тишины в секундах."""
-        if self._window is not None:
-            return float(self._window)
-        return float(presentation.rules().limits.merge_window_seconds)
+    def revise_window(self) -> float:
+        """Окно дозревания ответа в секундах."""
+        if self._revise_window is not None:
+            return float(self._revise_window)
+        return float(presentation.rules().limits.revise_window_seconds)
+
+    @property
+    def read_seconds(self) -> float:
+        """Сколько нужно, чтобы прочитать ответ."""
+        if self._read_seconds is not None:
+            return float(self._read_seconds)
+        return float(presentation.rules().limits.read_seconds)
+
+    @property
+    def max_revisions(self) -> int:
+        """Сколько раз один ответ можно переписать."""
+        if self._max_revisions is not None:
+            return max(1, int(self._max_revisions))
+        return max(1, presentation.rules().limits.max_revisions)
+
+    @property
+    def repeat_window(self) -> float:
+        """Окно, в котором повтор темы сам по себе означает отказ."""
+        if self._repeat_window is not None:
+            return float(self._repeat_window)
+        return float(presentation.rules().refusal.repeat_window_seconds)
+
+    @property
+    def escalate_after(self) -> int:
+        """После какого числа отказов по теме звать человека."""
+        if self._escalate_after is not None:
+            return max(1, int(self._escalate_after))
+        return max(1, presentation.rules().refusal.escalate_after)
+
+    # --- дозревание ответа ----------------------------------------------
 
     @staticmethod
-    def join(parts: list[str]) -> str:
+    def join(parts: Sequence[str]) -> str:
         """Склеить реплики в один вопрос."""
         return " ".join(part.strip() for part in parts if part and part.strip())
 
-    def push(self, chat_id: int | str | None, text: str,
-             flush: Callable[[str], Awaitable[None]]) -> asyncio.Task[None]:
-        """Положить реплику в буфер и перезапустить окно ожидания.
+    def classify(self, chat_id: int | str | None, text: str) -> str:
+        """«revision» — дописка к прежнему вопросу, «new» — новая реплика.
 
-        Возвращает задачу: она нужна тестам, чтобы дождаться ответа.
+        Дописка переписывает прежний ответ, новая реплика получает новое
+        сообщение. Правило целиком описано у класса.
+        """
+        waiting = self._pending.get(_key(chat_id))
+        if waiting is None or waiting.handle is None:
+            return "new"
+        age = self._clock() - waiting.at
+        if age > self.revise_window:
+            return "new"
+        if waiting.revisions >= self.max_revisions:
+            logger.info("чат %s: ответ переписан %d раз, дальше новый",
+                        chat_id, waiting.revisions)
+            return "new"
+        if age >= self.read_seconds and presentation.says_refusal(text):
+            # Ответ успели прочитать, и абонент говорит, что он не помог.
+            # Это реакция на ответ, а не продолжение вопроса.
+            return "new"
+        return "revision"
+
+    def extend(self, chat_id: int | str | None, text: str) -> str:
+        """Зачесть дописку и вернуть склеенный вопрос целиком.
+
+        Окно отсчитывается заново от этой правки, а не от первого
+        ответа: переписанный ответ абонент тоже ещё не читал, он в этот
+        момент печатал. Иначе мысль из четырёх частей по четыре секунды
+        всё равно разрывалась бы на середине — тот же дефект, только
+        растянутый. Бесконечной правку это не делает: число правок
+        ограничено :attr:`max_revisions`.
+        """
+        waiting = self._pending.get(_key(chat_id))
+        if waiting is None:
+            return (text or "").strip()
+        waiting.parts.append(text or "")
+        waiting.revisions += 1
+        waiting.at = self._clock()
+        return self.join(waiting.parts)
+
+    def handle(self, chat_id: int | str | None) -> Any | None:
+        """Сообщение бота, которое сейчас можно переписать."""
+        waiting = self._pending.get(_key(chat_id))
+        return waiting.handle if waiting is not None else None
+
+    def opened(self, chat_id: int | str | None, text: str,
+               handle: Any) -> None:
+        """Запомнить отправленный ответ: он открыт для дозревания."""
+        if handle is None:
+            self.close(chat_id)
+            return
+        self._pending[_key(chat_id)] = Pending(handle=handle,
+                                               parts=[text or ""],
+                                               at=self._clock())
+
+    def rebind(self, chat_id: int | str | None, handle: Any) -> None:
+        """Переписать не удалось: дальше дозревает уже это сообщение."""
+        key = _key(chat_id)
+        waiting = self._pending.get(key)
+        if waiting is None or handle is None:
+            self.opened(chat_id, "", handle)
+            return
+        waiting.handle = handle
+        waiting.at = self._clock()
+
+    def close(self, chat_id: int | str | None) -> None:
+        """Ответ прочитан или перекрыт: переписывать его больше нельзя."""
+        self._pending.pop(_key(chat_id), None)
+
+    def revisions(self, chat_id: int | str | None) -> int:
+        """Сколько раз текущий ответ переписан (тесты и отладка)."""
+        waiting = self._pending.get(_key(chat_id))
+        return waiting.revisions if waiting is not None else 0
+
+    # --- отказ от ответа -------------------------------------------------
+
+    def serve(self, chat_id: int | str | None, faq_id: int | None,
+              source: str = "text") -> None:
+        """Запомнить тему, показанную в чате. `None` обрывает цепочку."""
+        key = _key(chat_id)
+        if faq_id is None:
+            self._served.pop(key, None)
+            return
+        self._served[key] = Served(faq_id=int(faq_id), at=self._clock(),
+                                   source=source)
+
+    def served(self, chat_id: int | str | None) -> Served | None:
+        """Тема, показанная последней, пока она не устарела."""
+        key = _key(chat_id)
+        shown = self._served.get(key)
+        if shown is None:
+            return None
+        if self._clock() - shown.at > self.repeat_window:
+            self._served.pop(key, None)
+            return None
+        return shown
+
+    def reject(self, chat_id: int | str | None, faq_id: int | None) -> int:
+        """Запомнить, что тема не помогла. Возвращает номер отказа."""
+        key = _key(chat_id)
+        now = self._clock()
+        previous = self._rejected.get(key)
+        fresh = previous is not None and now - previous.at <= self.repeat_window
+        topics = previous.topics if fresh and previous is not None else ()
+        count = previous.count if fresh and previous is not None else 0
+        if faq_id is not None and int(faq_id) not in topics:
+            topics = topics + (int(faq_id),)
+        self._rejected[key] = Rejected(topics=topics, count=count + 1, at=now)
+        self._served.pop(key, None)
+        return count + 1
+
+    def rejected(self, chat_id: int | str | None) -> tuple[int, ...]:
+        """Темы, про которые в этом чате сказали «не помогло»."""
+        log = self._rejection_log(chat_id)
+        return log.topics if log is not None else ()
+
+    def refusals(self, chat_id: int | str | None) -> int:
+        """Сколько отказов подряд в этом чате."""
+        log = self._rejection_log(chat_id)
+        return log.count if log is not None else 0
+
+    def _rejection_log(self, chat_id: int | str | None) -> Rejected | None:
+        """Живой журнал отказов чата.
+
+        Журнал живёт то же окно, что и признак повтора: через три минуты
+        без отказов разговор считается новым, и ранее отвергнутая тема
+        снова имеет право на ответ. Иначе абонент, которому утром не
+        помог совет про интернет, вечером вообще не получил бы ответа
+        про интернет.
         """
         key = _key(chat_id)
-        self._parts.setdefault(key, []).append(text or "")
-        token = self._tokens.get(key, 0) + 1
-        self._tokens[key] = token
-        task = asyncio.ensure_future(self._flush_later(key, token, flush))
-        # Ссылку держим сами: иначе задачу может собрать сборщик мусора.
-        self._pending.add(task)
-        task.add_done_callback(self._pending.discard)
-        return task
+        log = self._rejected.get(key)
+        if log is None:
+            return None
+        if self._clock() - log.at > self.repeat_window:
+            self._rejected.pop(key, None)
+            return None
+        return log
 
-    async def _flush_later(self, key: str, token: int,
-                           flush: Callable[[str], Awaitable[None]]) -> None:
-        """Дождаться окна тишины и ответить один раз."""
-        try:
-            await asyncio.sleep(self.window)
-        except asyncio.CancelledError:
-            raise
-        if self._tokens.get(key) != token:
-            return                 # пришла новая реплика — ответит её таймер
-        parts = self._parts.pop(key, [])
-        self._tokens.pop(key, None)
-        joined = self.join(parts)
-        if not joined:
-            return
-        try:
-            await flush(joined)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("не удалось ответить на склеенную реплику")
+    def satisfied(self, chat_id: int | str | None) -> None:
+        """Вопрос закрыт («Понятно», оператор): цепочка отказов забыта."""
+        key = _key(chat_id)
+        self._rejected.pop(key, None)
+        self._served.pop(key, None)
 
-    def pending(self, chat_id: int | str | None) -> int:
-        """Сколько реплик чата ждут отправки (для тестов и отладки)."""
-        return len(self._parts.get(_key(chat_id), ()))
+    # --- уборка ----------------------------------------------------------
 
-    async def drain(self) -> None:
-        """Дождаться всех отложенных ответов. Нужно тестам и остановке."""
-        while self._pending:
-            await asyncio.gather(*list(self._pending), return_exceptions=True)
+    def forget(self, chat_id: int | str | None) -> None:
+        """Забыть разговор одного чата."""
+        key = _key(chat_id)
+        self._pending.pop(key, None)
+        self._served.pop(key, None)
+        self._rejected.pop(key, None)
 
     def clear(self) -> None:
-        """Забыть буферы всех чатов и снять ожидающие задачи."""
-        self._parts.clear()
-        self._tokens.clear()
-        for task in list(self._pending):
-            task.cancel()
+        """Забыть разговоры всех чатов (тесты, перезапуск)."""
         self._pending.clear()
+        self._served.clear()
+        self._rejected.clear()
 
 
-_buffer: MessageBuffer | None = None
+_flow: ConversationFlow | None = None
 
 
-def buffer() -> MessageBuffer:
-    """Буфер склейки, общий для процесса."""
-    global _buffer
-    if _buffer is None:
-        _buffer = MessageBuffer()
-    return _buffer
+def conversation() -> ConversationFlow:
+    """Состояние разговоров, общее для процесса."""
+    global _flow
+    if _flow is None:
+        _flow = ConversationFlow()
+    return _flow
 
 
 def reset_runtime_state() -> None:
-    """Забыть всё состояние слоя бота: язык, троттлинг, буферы, тему.
+    """Забыть всё состояние слоя бота: язык, троттлинг, разговоры, тему.
 
-    Ограничитель и буфер пересоздаются, а не просто чистятся: тест мог
-    подменить их своими порогами и часами, и это не должно протекать
-    в следующий тест.
+    Ограничитель и состояние разговоров пересоздаются, а не просто
+    чистятся: тест мог подменить их своими порогами и часами, и это не
+    должно протекать в следующий тест.
     """
-    global _throttle, _buffer
+    global _throttle, _flow
     _chat_language.clear()
     _chat_language_pinned.clear()
     _chat_language_streak.clear()
     if _throttle is not None:
         _throttle.clear()
         _throttle = None
-    if _buffer is not None:
-        _buffer.clear()
-        _buffer = None
+    if _flow is not None:
+        _flow.clear()
+        _flow = None
     reset_context()
 
 
@@ -446,7 +654,8 @@ def reset_runtime_state() -> None:
 
 def _operator_screen(chat_id: int | str | None,
                      reason: str | None = None,
-                     language: str | None = None) -> Screen:
+                     language: str | None = None,
+                     note: str | None = None) -> Screen:
     """Экран передачи оператору; причина уходит в агрегат /stats."""
     operator = presentation.rules().operator
     if language not in config.LANGUAGES:
@@ -455,17 +664,35 @@ def _operator_screen(chat_id: int | str | None,
         STATS.record_operator(reason, chat_id)
         MEMORY.forget_misses(chat_id)
     return presentation.operator_screen(entry_by_id(operator.faq_id),
-                                        language, reason)
+                                        language, reason, note)
 
 
 def screen_for_text(text: str,
-                    chat_id: int | str | None = None) -> Screen | None:
+                    chat_id: int | str | None = None,
+                    revision: bool = False,
+                    metered: bool = True) -> Screen | None:
     """Экран в ответ на свободный ввод или цифру меню.
 
     Порядок веток осознанный: сначала защита от флуда, потом цифра меню
     и просьба об операторе, потом приветствия и болтовня, и только затем
     `answer()`. Так «салам» получает приветствие, а «салам, интернет
     иштебейт» — настоящий поиск по базе.
+
+    `revision=True` означает, что абонент дописал реплику к своему же
+    вопросу и экран пойдёт правкой прежнего ответа. Тогда это не новая
+    реплика, а уточнение прежней, поэтому:
+
+    * бюджет ограничителя не расходуется — иначе человек, пишущий мысль
+      пятью сообщениями, сам себя заглушил бы;
+    * признаки отказа не проверяются — абонент ещё не читал ответ,
+      он его дописывает;
+    * прежняя запись в памяти диалога отменяется (`MEMORY.rollback`):
+      одна мысль обязана остаться одной репликой.
+
+    `metered=False` означает, что бюджет ограничителя за эту реплику уже
+    израсходован вызывающим. Так приходит распознанная речь: голосовое
+    проверяется ограничителем до распознавания, потому что распознавание
+    платное, а второй раз считать ту же реплику нельзя.
 
     `None` означает намеренную тишину: чат превысил лимит ответов и уже
     получил предупреждение.
@@ -475,14 +702,15 @@ def screen_for_text(text: str,
     if not stripped:
         return presentation.menu_screen(language)
 
-    verdict = throttle().check(chat_id)
-    if verdict == "mute":
-        logger.info("чат %s заглушен: больше %d ответов в окно",
-                    chat_id, throttle().limit)
-        return None
-    if verdict == "warn":
-        return presentation.notice_screen("too_fast", language,
-                                          with_menu=False)
+    if metered and not revision:
+        verdict = throttle().check(chat_id)
+        if verdict == "mute":
+            logger.info("чат %s заглушен: больше %d ответов в окно",
+                        chat_id, throttle().limit)
+            return None
+        if verdict == "warn":
+            return presentation.notice_screen("too_fast", language,
+                                              with_menu=False)
 
     limits = presentation.rules().limits
     if len(stripped) > limits.max_question_chars:
@@ -506,6 +734,15 @@ def screen_for_text(text: str,
     if intent is not None:
         return presentation.smalltalk_screen(intent, language)
 
+    if revision:
+        MEMORY.rollback(chat_id)
+        # Та же причина, что и у памяти диалога: мысль, дописанная тремя
+        # репликами, — это ОДИН вопрос абонента. Без отмены /stats считал
+        # бы три обращения вместо одного, а первая незаконченная часть
+        # («крч проблема такая») попадала бы в примеры неотвеченных —
+        # хотя ответ в итоге был найден и показан.
+        STATS.rollback()
+
     reply = respond(stripped, chat_id=chat_id, language=language)
     set_chat_language(chat_id, reply.lang)
     screen = presentation.answer_card(reply)
@@ -519,11 +756,18 @@ def screen_for_text(text: str,
         if reply.faq_id is None:
             return _operator_screen(chat_id, reason, reply.lang)
         STATS.record_operator(reason, chat_id)
+        conversation().serve(chat_id, reply.faq_id)
         return presentation.with_operator_offer(screen, reply.lang, reason,
                                                 "escalated")
 
+    if not revision:
+        refused = _refusal(stripped, reply, chat_id)
+        if refused is not None:
+            return _refusal_screen(refused, reply, chat_id, reply.lang)
+
     if reply.faq_id is None:
         screen = _maybe_offer_operator(screen, chat_id, reply.lang)
+    conversation().serve(chat_id, reply.faq_id)
     return screen
 
 
@@ -538,6 +782,107 @@ def _maybe_offer_operator(screen: Screen, chat_id: int | str | None,
     logger.info("чат %s не понят %d раза подряд, предлагаю оператора",
                 chat_id, threshold)
     return presentation.with_operator_offer(screen, language, "repeated_miss")
+
+
+# --------------------------------------------------------------------------
+# «Этот совет не помог»
+# --------------------------------------------------------------------------
+
+def _refusal(text: str, reply: Reply,
+             chat_id: int | str | None) -> tuple[str, int] | None:
+    """Признак отказа от предыдущего ответа и тема, которая не помогла.
+
+    Три признака, от бесспорного к осторожному.
+
+    * `rejected` — поиск снова вывел на тему, про которую в этом
+      разговоре уже сказали «не помогло». Второй раз подсовывать
+      заведомо бесполезный совет нельзя, что бы абонент ни написал.
+    * `repeat` — та же тема выдаётся текстовым вопросом второй раз
+      подряд внутри окна повтора. Это и был дефект живого теста: бот
+      дословно повторил карточку. Два исключения. Нажатая кнопка в
+      признак не считается: там тему выбрал сам абонент, и повторять его
+      собственный выбор — не ошибка бота. Унаследованная из контекста
+      тема — тоже: «а сколько стоит?» после вопроса о роуминге это
+      уточнение по той же теме, и ответить на него обязан пункт 4 ТЗ,
+      а не экран «совет не помог».
+    * `said` — абонент сказал «не помогло», «баары бир». Слов мало:
+      требуется, чтобы новый поиск не нашёл другую тему. «Не помогло,
+      а как пополнить счёт?» — это новый вопрос, и отвечать надо на
+      него, а не на прежнюю тему.
+    """
+    flow = conversation()
+    rejected = flow.rejected(chat_id)
+    if reply.faq_id is not None and reply.faq_id in rejected:
+        return "rejected", int(reply.faq_id)
+
+    shown = flow.served(chat_id)
+    if (shown is not None and shown.source == "text"
+            and reply.faq_id == shown.faq_id
+            and not reply.inherited_from_context):
+        return "repeat", shown.faq_id
+
+    if not presentation.says_refusal(text):
+        return None
+    # От какой темы отказываются. Обычно это последняя показанная; если
+    # показанной нет, значит цепочка отказов уже идёт («не помогло» —
+    # подсказки — «всё равно не работает»), и речь о последней
+    # отвергнутой теме.
+    topic = shown.faq_id if shown is not None else (
+        rejected[-1] if rejected else None)
+    if topic is not None and reply.faq_id in (None, topic):
+        return "said", topic
+    return None
+
+
+def _alternatives(text: str, reply: Reply, chat_id: int | str | None,
+                  rejected: int) -> list[FaqEntry]:
+    """До трёх тем, которых абонент в этом разговоре ещё не отвергал.
+
+    Сначала идут соседи по разделу меню: «почему не работает интернет»
+    стоит рядом с «настройкой APN» и «остатком пакетов», и именно это
+    следующий вопрос живого оператора. Разделы собраны руками, поэтому
+    подсказка получается осмысленной даже тогда, когда в самой реплике
+    нет ни одного слова по делу.
+
+    Кандидаты поиска добавляются только если абонент назвал тему своими
+    словами. На голом «не помогло» поиск возвращает шум — «как узнать
+    свой номер» вместо настройки APN, — и показывать его стыдно.
+    """
+    skip = set(conversation().rejected(chat_id)) | {rejected}
+    order: list[int] = []
+    section = presentation.section_for_faq(rejected)
+    if section is not None:
+        order += [item for item in section.faq_ids if item not in skip]
+    if mentions_topic(text):
+        order += [item for item in reply.suggestions
+                  if item not in skip and item not in order]
+    found = (entry_by_id(item) for item in order[:config.TOP_K])
+    return [entry for entry in found if entry is not None]
+
+
+def _refusal_screen(refused: tuple[str, int], reply: Reply,
+                    chat_id: int | str | None, language: str) -> Screen:
+    """Ответ на «не помогло»: другие темы, а при повторе — человек.
+
+    Тот же текст не повторяется никогда. На первый отказ абонент видит
+    до трёх других тем кнопками и предложение оператора, на следующий —
+    сразу оператора с причиной `not_helping`: советы по этой теме
+    кончились, и честнее сказать это, чем перебирать базу дальше.
+    """
+    signal, topic = refused
+    flow = conversation()
+    count = flow.reject(chat_id, topic)
+    logger.info("чат %s: отказ от темы %s (признак %s), отказ номер %d",
+                chat_id, topic, signal, count)
+
+    if count >= flow.escalate_after:
+        flow.satisfied(chat_id)
+        return _operator_screen(chat_id, "not_helping", language,
+                                note="no_more_advice")
+
+    return presentation.alternatives_screen(
+        _alternatives(reply.text, reply, chat_id, topic), language,
+        entry_by_id(topic))
 
 
 def screen_for_action(action: str, chat_id: int | str | None = None) -> Screen:
@@ -561,6 +906,10 @@ def screen_for_action(action: str, chat_id: int | str | None = None) -> Screen:
     if command == "faq" and argument.isdigit():
         reply = reply_for_faq_id(int(argument), language, chat_id=chat_id)
         if reply is not None:
+            # Тему выбрал сам абонент. Запоминаем её, чтобы потом понять
+            # «баары бир иштебей жатат», но помечаем источником кнопку:
+            # повтор собственного выбора отказом не считается.
+            conversation().serve(chat_id, reply.faq_id, "button")
             return presentation.answer_card(reply)
         return presentation.menu_screen(language)
 
@@ -573,12 +922,23 @@ def screen_for_action(action: str, chat_id: int | str | None = None) -> Screen:
         return presentation.section_screen(section, all_entries(), language)
 
     if command == "operator":
+        conversation().satisfied(chat_id)
         return _operator_screen(chat_id, "direct_request", language)
     if command == "ack":
-        return presentation.acknowledged_screen(language)
+        # «Понятно» — это «совет подошёл». Цепочка отказов закрыта, и тот
+        # же вопрос позже снова получит обычный ответ, а не подсказки.
+        conversation().satisfied(chat_id)
+        reply = _reply_for_argument(argument, language, chat_id)
+        if reply is None:
+            return presentation.acknowledged_screen(language)
+        return presentation.acknowledged_card(reply)
     if command == "another":
         reset_context(chat_id)
-        return presentation.another_question_screen(language)
+        conversation().forget(chat_id)
+        reply = _reply_for_argument(argument, language, chat_id)
+        if reply is None:
+            return presentation.another_question_screen(language)
+        return presentation.another_question_card(reply)
     if command == "help":
         return presentation.help_screen(language)
     if command == "lang":
@@ -586,6 +946,34 @@ def screen_for_action(action: str, chat_id: int | str | None = None) -> Screen:
     if command == "stats":
         return stats_screen(chat_id)
     return presentation.menu_screen(language)
+
+
+def _reply_for_argument(argument: str, language: str,
+                        chat_id: int | str | None) -> Reply | None:
+    """Ответ по номеру темы из адреса кнопки (`ack:4`, `another:4`).
+
+    `None` означает, что номера в кнопке нет или темы с таким номером не
+    существует: кнопка пришла из старого сообщения, и пересобирать
+    карточку не из чего.
+
+    Контекст диалога здесь не трогаем намеренно: «Понятно» и «Другой
+    вопрос» — это не новый вопрос по теме, а закрытие прежнего.
+    """
+    if not argument.isdigit():
+        return None
+    entry = entry_by_id(int(argument))
+    if entry is None:
+        return None
+    return Reply(
+        text=entry.question(language),
+        lang=language,
+        faq_id=entry.id,
+        confidence=1.0,
+        candidates=(entry.id,),
+        suggestions=(entry.id,),
+        entry=entry,
+        suggestion_entries=(entry,),
+    )
 
 
 def _language_screen(argument: str, chat_id: int | str | None,
@@ -629,13 +1017,15 @@ def _markup(screen: Screen) -> Any | None:
     return InlineKeyboardMarkup(keyboard)
 
 
-async def _send(message: Any, screen: Screen) -> None:
-    """Отправить экран новым сообщением.
+async def _send(message: Any, screen: Screen) -> Any:
+    """Отправить экран новым сообщением и вернуть отправленное.
 
-    Новое сообщение появляется только в ответ на новый текст абонента и
-    на команду. Нажатие кнопки сообщений не плодит — см. :func:`_edit`.
+    Новое сообщение появляется только в ответ на первую реплику мысли и
+    на команду. Нажатие кнопки сообщений не плодит (:func:`_edit`),
+    дописанная реплика — тоже (:func:`_rewrite`): она переписывает то
+    сообщение, которое вернула эта функция.
     """
-    await message.reply_text(
+    return await message.reply_text(
         screen.text,
         parse_mode=screen.parse_mode,
         reply_markup=_markup(screen),
@@ -654,15 +1044,15 @@ def _is_not_modified(error: BaseException) -> bool:
     return NOT_MODIFIED in str(error).lower()
 
 
-async def _edit(query: Any, screen: Screen) -> str:
-    """Переписать сообщение, в котором нажата кнопка.
+async def _apply(call: Callable[..., Any], screen: Screen) -> str:
+    """Переписать сообщение вызовом `call`.
 
     Возвращает «edited», «unchanged» или «failed» — состояние нужно
     тестам и логу. Новых сообщений функция не отправляет: именно от них
     чат превращался в простыню, где не найти сам ответ.
 
-    `edit_message_text` с `reply_markup=None` заодно убирает клавиатуру —
-    так карточка сворачивается в одну строку после «Понятно».
+    `reply_markup=None` заодно убирает клавиатуру — так карточка
+    сворачивается в одну строку после «Понятно».
     """
     try:
         from telegram.error import TelegramError as _Error
@@ -670,7 +1060,7 @@ async def _edit(query: Any, screen: Screen) -> str:
         _Error = Exception                    # type: ignore[assignment, misc]
 
     try:
-        await query.edit_message_text(
+        await call(
             screen.text,
             parse_mode=screen.parse_mode,
             reply_markup=_markup(screen),
@@ -685,9 +1075,32 @@ async def _edit(query: Any, screen: Screen) -> str:
     return "edited"
 
 
+async def _edit(query: Any, screen: Screen) -> str:
+    """Переписать сообщение, в котором нажата кнопка."""
+    return await _apply(query.edit_message_text, screen)
+
+
+async def _rewrite(sent: Any, screen: Screen) -> str:
+    """Переписать свой же прежний ответ: абонент дописал реплику.
+
+    Правка, а не новое сообщение: ответ уточняется на лету, задержки
+    нет, переписка не растёт. Если сообщение переписать нельзя (его
+    удалили, оно слишком старое), возвращается «failed», и вызывающий
+    отвечает новым сообщением — молчание было бы хуже.
+    """
+    if sent is None:
+        return "failed"
+    editor = getattr(sent, "edit_text", None)
+    if editor is None:                        # pragma: no cover
+        logger.warning("сообщение не умеет edit_text, отвечаю новым")
+        return "failed"
+    return await _apply(editor, screen)
+
+
 async def _on_start(update: Any, context: Any) -> None:
     """/start — USSD-меню. Экрана выбора языка нет намеренно."""
     chat_id = update.effective_chat.id
+    conversation().close(chat_id)
     await _send(update.effective_message,
                 presentation.start_screen(chat_language(chat_id)))
 
@@ -695,6 +1108,7 @@ async def _on_start(update: Any, context: Any) -> None:
 async def _on_help(update: Any, context: Any) -> None:
     """/help — короткая справка."""
     chat_id = update.effective_chat.id
+    conversation().close(chat_id)
     await _send(update.effective_message,
                 presentation.help_screen(chat_language(chat_id)))
 
@@ -702,6 +1116,7 @@ async def _on_help(update: Any, context: Any) -> None:
 async def _on_stats(update: Any, context: Any) -> None:
     """/stats — агрегат неотвеченных вопросов."""
     chat_id = update.effective_chat.id
+    conversation().close(chat_id)
     await _send(update.effective_message, stats_screen(chat_id))
 
 
@@ -714,27 +1129,158 @@ async def _on_reset(update: Any, context: Any) -> None:
 
 
 async def _on_text(update: Any, context: Any) -> None:
-    """Свободный вопрос абонента: один ответ на серию подряд идущих реплик."""
+    """Свободный вопрос абонента: ответ сразу, уточнение — правкой ответа.
+
+    Первая реплика получает ответ немедленно. Дописанная в окно
+    дозревания реплика нового сообщения не приносит: бот считает ответ
+    заново по склеенному тексту и переписывает им свой же прежний ответ.
+    Правило «дописка или реакция» целиком живёт в
+    :class:`ConversationFlow`, здесь только отправка и правка.
+    """
     message = update.effective_message
     chat_id = update.effective_chat.id
+    text = message.text or ""
+    flow = conversation()
 
-    async def flush(joined: str) -> None:
-        screen = screen_for_text(joined, chat_id)
-        if screen is None:
-            return                      # троттлинг: намеренная тишина
+    if flow.classify(chat_id, text) == "revision":
+        joined = flow.extend(chat_id, text)
+        screen = screen_for_text(joined, chat_id, revision=True)
+        if screen is None:                  # троттлинг: намеренная тишина
+            return
+        screen = presentation.with_revision_note(screen,
+                                                 chat_language(chat_id))
+        if await _rewrite(flow.handle(chat_id), screen) != "failed":
+            return
+        # Переписать нечего (сообщение удалили). Молчать нельзя: отвечаем
+        # новым сообщением по тому же склеенному тексту.
+        flow.rebind(chat_id, await _send(message, screen))
+        return
+
+    screen = screen_for_text(text, chat_id)
+    if screen is None:
+        flow.close(chat_id)
+        return
+    flow.opened(chat_id, text, await _send(message, screen))
+
+
+#: Какое уведомление показать на каждый неудачный статус распознавания.
+#: Коды совпадают со статусами `faq_bot.speech`, но перечислены строками:
+#: модуль распознавания импортируется лениво и не нужен ни `answer()`, ни
+#: тестам без голоса. `failed` и `nothing` ведут к одному тексту — абоненту
+#: в обоих случаях нужно одно и то же: повторить или написать.
+VOICE_NOTICES: Mapping[str, str] = {
+    "too_long": "voice_too_long",
+    "rate_limited": "voice_rate_limited",
+    "no_key": "voice_no_key",
+    "nothing": "voice_nothing",
+    "failed": "voice_nothing",
+}
+
+
+async def _deliver(message: Any, handle: Any, screen: Screen) -> None:
+    """Показать экран правкой своего сообщения, а если нельзя — новым."""
+    if await _rewrite(handle, screen) == "failed":
         await _send(message, screen)
 
-    buffer().push(chat_id, message.text or "", flush)
+
+async def _transcribe(voice: Any, chat_id: int | str | None) -> Any:
+    """Скачать запись, распознать и удалить файл. Исключений не бросает.
+
+    Распознавание синхронное (urllib с таймаутом до минуты) и уходит в
+    отдельный поток: иначе одно голосовое заморозило бы весь бот,
+    включая текстовые вопросы остальных абонентов.
+
+    Временный каталог удаляется в `finally` при любом исходе: голос
+    абонента не имеет права остаться на диске сервера.
+    """
+    # Ленивый импорт: распознавание нужно только боту и только здесь.
+    from . import speech
+
+    folder = tempfile.mkdtemp(prefix="faq_voice_")
+    try:
+        path = Path(folder) / "voice.oga"
+        source = await voice.get_file()
+        await source.download_to_drive(custom_path=str(path))
+        seconds = float(getattr(voice, "duration", 0) or 0)
+        return await asyncio.to_thread(speech.transcribe, path,
+                                       chat_id=str(chat_id),
+                                       declared_seconds=seconds)
+    except Exception:
+        logger.exception("не удалось получить голосовое сообщение")
+        return speech.Transcript(speech.FAILED)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+async def _on_voice(update: Any, context: Any) -> None:
+    """Голосовое сообщение: распознаём и отвечаем обычным путём.
+
+    Своей логики ответа у голоса нет: распознанный текст идёт в
+    :func:`screen_for_text`, как набранный руками. Отличий ровно три.
+
+    1. **Эхо.** Перед карточкой печатается то, что бот услышал:
+       распознавание ошибается, и без эха абонент не поймёт, почему
+       ответ мимо.
+    2. **Ограничитель раньше распознавания.** Распознавание платное и
+       считается по секундам записи, поэтому лишняя реплика отсекается
+       до обращения к сети, а не после.
+    3. **Без дозревания.** Голосовые не дописывают порциями, поэтому
+       ответ на голосовое не открыт для правки следующей репликой.
+       Открытое дозревание прежнего текстового ответа закрывается:
+       голосовое — это новая реплика.
+
+    Пределы длины и бюджеты живут в `faq_bot.speech` и здесь не
+    ослабляются: ключ оплачивает человек.
+    """
+    message = update.effective_message
+    chat_id = update.effective_chat.id
+    language = chat_language(chat_id)
+    conversation().close(chat_id)
+
+    verdict = throttle().check(chat_id)
+    if verdict == "mute":
+        logger.info("чат %s заглушен, голосовое не распознаётся", chat_id)
+        return
+    if verdict == "warn":
+        await _send(message, presentation.notice_screen("too_fast", language,
+                                                        with_menu=False))
+        return
+
+    voice = getattr(message, "voice", None)
+    if voice is None:                              # pragma: no cover
+        return
+
+    waiting = await _send(message, presentation.listening_screen(language))
+    transcript = await _transcribe(voice, chat_id)
+    if not transcript.ok:
+        notice = VOICE_NOTICES.get(transcript.status, "voice_nothing")
+        logger.info("чат %s: голосовое не распознано (%s)",
+                    chat_id, transcript.status)
+        await _deliver(message, waiting,
+                       presentation.notice_screen(notice, language))
+        return
+
+    heard = transcript.text.strip()
+    logger.info("чат %s: распознано %.1f с речи, %d знаков",
+                chat_id, transcript.seconds, len(heard))
+    screen = screen_for_text(heard, chat_id, metered=False)
+    if screen is None:                             # pragma: no cover
+        return
+    await _deliver(message, waiting,
+                   presentation.with_heard(screen, heard,
+                                           chat_language(chat_id)))
 
 
 async def _on_button(update: Any, context: Any) -> None:
     """Нажатие кнопки переписывает то сообщение, в котором эта кнопка.
 
     Раздел меню превращается в список тем, тема — в карточку ответа,
-    «Меню» — обратно в меню, «Понятно» — в одну строку подтверждения.
-    Новых сообщений не отправляется ни одного: за минуту живого теста
-    три сообщения на касание превращали чат в двадцать сообщений, среди
-    которых не найти ответ.
+    «Меню» — обратно в меню. Новых сообщений не отправляется ни одного:
+    за минуту живого теста три сообщения на касание превращали чат в
+    двадцать сообщений, среди которых не найти ответ.
+
+    Нажатие закрывает окно дозревания ответа: раз абонент нажал кнопку,
+    он ответ видел, и дописывать к прежнему вопросу уже нечего.
 
     `answer_callback_query` вызывается первым и всегда: без него у
     кнопки до сорока секунд крутятся часики, даже если экран уже
@@ -743,6 +1289,7 @@ async def _on_button(update: Any, context: Any) -> None:
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
+    conversation().close(chat_id)
     screen = screen_for_action(query.data or "", chat_id)
     await _edit(query, screen)
 
@@ -763,6 +1310,7 @@ def build_application(token: str) -> Any:
     application.add_handler(CommandHandler("stats", _on_stats))
     application.add_handler(CommandHandler("reset", _on_reset))
     application.add_handler(CallbackQueryHandler(_on_button))
+    application.add_handler(MessageHandler(filters.VOICE, _on_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
                                            _on_text))
     return application
@@ -794,12 +1342,18 @@ def run(token: str | None = None) -> int:
 
     rules = presentation.rules()
     logger.info("правила поведения: %s", rules.source)
-    logger.info("склейка реплик %.1f с, не больше %d ответов в %.0f с, "
-                "вопрос до %d знаков",
-                rules.limits.merge_window_seconds,
+    logger.info("ответ дозревает %.1f с (до %d правок), чтение %.1f с, "
+                "не больше %d ответов в %.0f с, вопрос до %d знаков",
+                rules.limits.revise_window_seconds,
+                rules.limits.max_revisions,
+                rules.limits.read_seconds,
                 rules.limits.replies_per_window,
                 rules.limits.window_seconds,
                 rules.limits.max_question_chars)
+    logger.info("повтор темы считается отказом в окне %.0f с, "
+                "оператор после %d отказов",
+                rules.refusal.repeat_window_seconds,
+                rules.refusal.escalate_after)
     print("Бот запущен. Остановить — Ctrl+C.")
     try:
         application.run_polling()

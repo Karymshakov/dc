@@ -19,6 +19,12 @@
 слою бота: после нескольких отказов в одном чате бот сам предлагает
 оператора, а не ждёт, пока абонент найдёт кнопку. Счётчик сбрасывается
 любым успешным ответом и не влияет на контракт `answer()`.
+
+Третья вещь для слоя бота — `DialogMemory.rollback()`. Бот отвечает на
+первую реплику сразу, а дописанные к ней уточнения пересчитывают ответ
+и переписывают то же сообщение. Для памяти диалога такая серия обязана
+остаться одной репликой, иначе один вопрос, набранный тремя
+сообщениями, вытеснит из памяти всю историю чата.
 """
 from __future__ import annotations
 
@@ -184,6 +190,9 @@ class DialogMemory:
         self._max_chats = max(1, int(max_chats))
         self._chats: OrderedDict[str, deque[Turn]] = OrderedDict()
         self._misses: OrderedDict[str, MissStreak] = OrderedDict()
+        # Что сделал последний remember() этого чата: "turn" или "miss".
+        # Нужно только rollback(), см. его описание.
+        self._last: OrderedDict[str, str] = OrderedDict()
 
     @staticmethod
     def _key(chat_id: int | str) -> str:
@@ -199,10 +208,13 @@ class DialogMemory:
         if chat_id is None:
             return
         if faq_id is None:
-            self._remember_miss(self._key(chat_id))
+            key = self._key(chat_id)
+            self._remember_miss(key)
+            self._mark_last(key, "miss")
             return
         key = self._key(chat_id)
         self._misses.pop(key, None)
+        self._mark_last(key, "turn")
         turns = self._chats.get(key)
         if turns is None:
             turns = deque(maxlen=self._max_turns)
@@ -224,6 +236,50 @@ class DialogMemory:
         self._misses.move_to_end(key)
         while len(self._misses) > self._max_chats:
             self._misses.popitem(last=False)
+
+    def _mark_last(self, key: str, kind: str) -> None:
+        """Запомнить вид последней записи чата (для `rollback`)."""
+        self._last[key] = kind
+        self._last.move_to_end(key)
+        while len(self._last) > self._max_chats:
+            self._last.popitem(last=False)
+
+    def rollback(self, chat_id: int | str | None) -> bool:
+        """Отменить последнюю запомненную реплику чата.
+
+        Нужно слою бота. Когда абонент дописывает реплику к своему же
+        вопросу, бот считает ответ заново по склеенному тексту и
+        переписывает им предыдущий ответ. Для памяти диалога это должна
+        остаться одна реплика, а не две: иначе один вопрос, набранный
+        тремя сообщениями, вытеснит из короткой памяти всю историю чата
+        и трижды продлит цепочку отказов, а абонент получит предложение
+        оператора на первой же своей мысли.
+
+        Возвращает True, если что-то отменено. Контракт `answer()`
+        функция не затрагивает: её вызывает только слой бота.
+        """
+        if chat_id is None:
+            return False
+        key = self._key(chat_id)
+        kind = self._last.pop(key, None)
+        if kind == "turn":
+            turns = self._chats.get(key)
+            if not turns:
+                return False
+            turns.pop()
+            if not turns:
+                self._chats.pop(key, None)
+            return True
+        if kind == "miss":
+            streak = self._misses.pop(key, None)
+            if streak is None:
+                return False
+            if streak.count > 1:
+                self._misses[key] = MissStreak(count=streak.count - 1,
+                                               at=streak.at)
+                self._misses.move_to_end(key)
+            return True
+        return False
 
     def misses(self, chat_id: int | str | None) -> int:
         """Сколько раз подряд в этом чате не нашлось темы."""
@@ -266,11 +322,13 @@ class DialogMemory:
         """Забыть один чат (команда «другой вопрос», конец диалога)."""
         self._chats.pop(self._key(chat_id), None)
         self._misses.pop(self._key(chat_id), None)
+        self._last.pop(self._key(chat_id), None)
 
     def clear(self) -> None:
         """Забыть всё. Нужно тестам и перезапуску бота."""
         self._chats.clear()
         self._misses.clear()
+        self._last.clear()
 
     def __len__(self) -> int:
         return len(self._chats)
