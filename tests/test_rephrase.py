@@ -78,14 +78,17 @@ class FakeModel:
         self.replies = list(replies) or [""]
         self.bodies: list[dict] = []
         self.urls: list[str] = []
+        self.keys: list[str] = []
 
     @property
     def calls(self) -> int:
         return len(self.bodies)
 
-    def __call__(self, url: str, body: dict, timeout: float = 0.0) -> dict:
+    def __call__(self, url: str, body: dict, timeout: float = 0.0,
+                 *, api_key: str = "") -> dict:
         self.bodies.append(body)
         self.urls.append(url)
+        self.keys.append(api_key)
         reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         if isinstance(reply, Exception):
             raise reply
@@ -504,6 +507,24 @@ def test_request_is_cheap_by_construction(monkeypatch, by_id):
     assert body["generationConfig"]["temperature"] <= 0.3
     assert "flash-lite" in fake.urls[0]
     assert module.DEFAULT_MODEL in fake.urls[0]
+
+
+def test_key_never_enters_the_address(monkeypatch, by_id):
+    """Ключ уходит заголовком. В строке адреса его быть не должно.
+
+    Адрес запроса видят посредники, он попадает в журналы и в текст
+    исключений. На Telegram мы это уже проходили: библиотека httpx
+    печатала полный URL вместе с токеном в журнал уровня INFO.
+    """
+    entry = by_id[1]
+    fake = install(monkeypatch, "Проверка баланса бесплатна, наберите *100#.")
+
+    module.rephrase("скока денег на счету", entry, "ru")
+
+    assert "key=" not in fake.urls[0]
+    assert "ключ-для-теста" not in fake.urls[0]
+    # И при этом ключ до транспорта всё-таки доехал — отдельным доводом.
+    assert fake.keys[0] == "ключ-для-теста"
 
 
 def test_prompt_carries_only_the_found_entry(monkeypatch, by_id):

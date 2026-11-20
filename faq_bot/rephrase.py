@@ -332,16 +332,23 @@ def build_prompt(question: str, answer: str, language: str) -> str:
     )
 
 
-def transport(url: str, body: dict, timeout: float = TIMEOUT_SECONDS) -> dict:
+def transport(url: str, body: dict, timeout: float = TIMEOUT_SECONDS,
+              *, api_key: str = "") -> dict:
     """Единственное место, где модуль выходит в сеть.
 
     Вынесено отдельной функцией ради тестов: они подменяют её целиком и
     поэтому не могут случайно обратиться к настоящему API.
+
+    Ключ приходит отдельным доводом и уходит заголовком, а не в строке
+    адреса: адрес попадает в журналы посредников и в текст исключений.
     """
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["x-goog-api-key"] = api_key
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -496,13 +503,13 @@ def _rephrase(question: str, entry: FaqEntry, language: str, base: str,
                        chat_id, limit_reason)
         return Rephrased(base, SKIPPED, reason=limit_reason)
 
-    url = ENDPOINT.format(model=model) + f"?key={api}"
+    url = ENDPOINT.format(model=model)
     body = _request_body(build_prompt(question, base, language))
 
     # Списываем попытку до обращения к сети: см. CallBudget.record.
     BUDGET.record(chat_id)
     try:
-        payload = transport(url, body)
+        payload = transport(url, body, api_key=api)
     except Exception as error:                      # сеть, таймаут, разбор
         logger.warning("Модель не ответила: %s", error)
         return Rephrased(base, FAQ, reason=f"модель недоступна: {error}")

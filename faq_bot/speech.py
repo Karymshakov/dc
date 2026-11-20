@@ -238,10 +238,15 @@ def transcribe(file_path: str | Path, *, chat_id: str | None = None,
         "generationConfig": {"temperature": 0.0, "maxOutputTokens": 256},
     }
 
+    # Ключ передаём заголовком, а не в строке адреса. Адрес виден
+    # посредникам и попадает в текст исключений и в журналы; заголовок —
+    # нет. Этим мы уже обжигались на Telegram: httpx печатал полный URL
+    # с токеном в журнал уровня INFO.
     request = urllib.request.Request(
-        ENDPOINT.format(model=model) + f"?key={key}",
+        ENDPOINT.format(model=model),
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json",
+                 "x-goog-api-key": key},
         method="POST",
     )
 
