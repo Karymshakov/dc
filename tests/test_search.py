@@ -168,6 +168,31 @@ def test_ветка_rapidfuzz_работает_так_же(monkeypatch):
         importlib.reload(module)
 
 
+def test_подтверждает_тему_только_различающее_слово():
+    """Общий корень не подтверждение: «купить» есть у темы 7 и больше нигде.
+
+    Это второй сигнал отсева, адресный: не «знает ли область эти слова»,
+    а «есть ли у ЭТОЙ темы слово из вопроса». Живая ошибка, из-за которой
+    он появился: «как купить симку» уходило в тему 7 «дополнительный
+    интернет», потому что «купить» стоит в её синонимах, а «симку»
+    у неё не находило ничего.
+    """
+    fuzzy = FuzzySearch(ENTRIES)
+    supported = fuzzy.supported_topics("как купить симку")
+    assert 6 in supported, "«симку» — слово темы про SIM"
+    assert 7 not in supported, "у темы 7 только общий корень «купить»"
+    # Вопрос из одних общих корней не подтверждает вообще ничего.
+    assert fuzzy.supported_topics("как это работает") == set()
+    assert fuzzy.supported_topics("") == set()
+    # Опечатка подтверждение не теряет: сравнение слов то же нечёткое.
+    assert 1 in fuzzy.supported_topics("как проверть балнс")
+    # Дословный вопрос базы обязан подтверждать свою тему на двух языках.
+    for entry in ENTRIES:
+        for language in config.LANGUAGES:
+            assert entry.id in fuzzy.supported_topics(entry.question(language)), (
+                entry.id, language)
+
+
 def test_словарное_покрытие_отличает_чужую_лексику():
     fuzzy = FuzzySearch(ENTRIES)
     assert fuzzy.vocabulary_coverage("Прогноз погоды на завтра") == 0.0

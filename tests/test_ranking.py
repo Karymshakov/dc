@@ -144,6 +144,74 @@ def test_разговорные_формулировки_без_общих_сл�
         assert decision.faq_id == faq_id, (text, decision)
 
 
+def test_один_общий_корень_не_считается_ответом():
+    """Совпадение по общему корню без подтверждения — повод для кнопок.
+
+    Живая ошибка: вопрос про самого бота «а как ты работаешь» делил с темой
+    «Почему не работает интернет?» корень «работа» и получал её как ответ
+    с уверенностью выше порога. Правило: если тему не подтверждает ни одно
+    различающее слово запроса, тема не выдаётся. В кандидатах она остаётся —
+    пользователь увидит три похожих вопроса кнопками.
+    """
+    for text in ("а как ты работаешь", "как это работает", "а что ты умеешь",
+                 "сколько стоит?", "хочу подключить", "можно получить?"):
+        decision = RANKER.decide(text)
+        assert decision.faq_id is None, (text, decision)
+        assert decision.confidence < config.CONFIDENCE_THRESHOLD, (text, decision)
+
+
+def test_подтверждённая_тема_обгоняет_тему_на_общем_корне():
+    """«Купить симку» — это про SIM, а не про покупку гигабайтов.
+
+    Штраф применяется до сортировки, поэтому неподтверждённая тема не
+    остаётся первой кнопкой только за счёт более высокой похожести.
+    """
+    decision = RANKER.decide("как купить симку")
+    assert decision.candidates, decision
+    assert decision.candidates[0] == 6, decision
+    assert decision.faq_id in (None, 6), decision
+
+
+def test_омонимичный_внецелевой_вопрос_даёт_null():
+    """Счёт в игре — не счёт абонента, и порогом это не лечится.
+
+    Живой контрпример: «Футболдун эсеби кандай?» получал тему «баланс»
+    с уверенностью 0.47, то есть выше, чем у настоящих вопросов про
+    баланс (0.41). Поэтому вопрос решается знанием, а не числом, и
+    проверка стоит здесь: отказ обязан быть при любом разумном пороге.
+    """
+    for text in ("Футболдун эсеби кандай?", "Какой счёт в матче?",
+                 "Оюндун эсеби канча?", "матчтын эсеби кандай",
+                 "какой счет у игры"):
+        decision = RANKER.decide(text)
+        assert decision.faq_id is None, (text, decision)
+        assert decision.confidence < config.CONFIDENCE_THRESHOLD, (text, decision)
+
+
+def test_законный_вопрос_про_счёт_абонента_не_пострадал():
+    """Разведение омонимов не имеет права стоить темы 1 и 11."""
+    for text, faq_id in (("Эсебимде канча сом калды?", 1), ("счет на нуле", 1),
+                         ("состояние счета", 1), ("Эсепке акча салуу", 11),
+                         ("Эсебимди кайдан толуктасам болот?", 11)):
+        decision = RANKER.decide(text)
+        assert decision.faq_id == faq_id, (text, decision)
+
+
+def test_уверенность_осмысленна_на_разговорных_вопросах():
+    """Явный вопрос заметно выше порога, внецелевой заметно ниже.
+
+    Численного совпадения с эталоном ТЗ не требует, но шкала должна
+    различать «уверен» и «не уверен», иначе цвет ответа бессмыслен.
+    """
+    for text in ("Скока денег на счету?", "баланс покажи", "Оператор керек",
+                 "Инет не грузит, что делать", "Balansymdy kantip korom"):
+        decision = RANKER.decide(text)
+        assert decision.confidence >= config.CONFIDENCE_CONFIDENT, (text, decision)
+    for text in OUT_OF_SCOPE:
+        decision = RANKER.decide(text)
+        assert decision.confidence < config.CONFIDENCE_THRESHOLD, (text, decision)
+
+
 def test_кыргызская_латиница_доходит_до_темы():
     assert decide("Balansymdy kantip korom").faq_id == 1
     assert decide("Internet ishtebei jatat").faq_id == 3

@@ -1,27 +1,37 @@
-"""Оформление ответов: USSD-меню, двуязычная карточка, светофор уверенности.
+"""Оформление ответов: USSD-меню, карточка ответа, светофор уверенности.
 
 Слой намеренно отделён от Telegram: здесь только чистые функции, которые
 возвращают текст и описание кнопок (`Screen`). Благодаря этому интерфейс
 проверяется обычными тестами, а `bot.py` занимается лишь превращением
-`Screen` в сообщение.
+`Screen` в сообщение — причём на нажатие кнопки он **переписывает** то же
+сообщение, а не присылает новое.
 
-Три идеи, на которых держится интерфейс.
+Четыре идеи, на которых держится интерфейс.
 
-1. **USSD-меню как вход.** Вся предметная область — это `*100#` и прочие
-   короткие коды, абоненты к ним привыкли. Меню пронумеровано и двуязычно
-   в одну строку: цифра не имеет языка, и это самый доступный элемент
-   интерфейса для двуязычной аудитории. Свободный ввод работает всегда,
-   меню — запасной путь, а не обязательный шаг.
-2. **Двуязычная карточка.** Ответ на языке вопроса — крупно; USSD-код
-   вынесен отдельным моноширинным блоком, чтобы копировался одним
-   касанием; тот же ответ вторым языком — мелко, курсивом.
-3. **Светофор уверенности.** 🟢 уверенный ответ, 🟡 ответ плюс «может
+1. **Один язык за раз.** ТЗ требует «определяет язык вопроса, находит
+   ответ и отвечает на том же языке», поэтому карточка, меню, списки тем
+   и служебные подписи печатаются ровно на одном языке. Двуязычный текст
+   вдвое длиннее, а переключатель языка при нём бессмыслен: что ни
+   нажми, на экране всё равно оба языка. Единственное исключение —
+   экран `/start`: там язык абонента ещё неизвестен.
+2. **Переключатель перерисовывает экран.** Кнопка 🇰🇬/🇷🇺 несёт в себе
+   адрес текущего экрана (`lang:ky:faq:4`), поэтому после нажатия абонент
+   видит тот же ответ на другом языке, а не новое сообщение с меню.
+3. **USSD-меню как вход.** Вся предметная область — это `*100#` и прочие
+   короткие коды, абоненты к ним привыкли. Меню пронумеровано: цифра не
+   имеет языка и работает одинаково для обеих аудиторий. Свободный ввод
+   работает всегда, меню — запасной путь, а не обязательный шаг.
+4. **Светофор уверенности.** 🟢 уверенный ответ, 🟡 ответ плюс «может
    быть, вы про это?», 🔴 ответа нет, только три похожих вопроса
    кнопками. Порог перестаёт быть числом в конфиге и становится видимым
    поведением.
 
 Экрана «выберите язык» нет: язык определяется сам, переключатель спрятан
-в одну кнопку, и выбранное состояние видно в меню.
+в одну кнопку, а результат нажатия виден по самому тексту экрана.
+
+Полное меню печатается только там, где без него не обойтись: по `/start`,
+по кнопке «Меню» и в отказе, к которому не нашлось даже похожих вопросов.
+После удачного ответа меню не нужно — у карточки есть свои кнопки.
 
 Тексты и списки слов не зашиты в код: они лежат в `faq_bot/bot_rules.json`
 и читаются загрузчиком :func:`rules`. Правит их человек без Python,
@@ -52,6 +62,7 @@ logger = logging.getLogger(__name__)
 USSD_RE = re.compile(r"\*\d[\w*#]*#", re.UNICODE)
 
 LANGUAGE_NAMES: Mapping[str, str] = {"ru": "Русский", "ky": "Кыргызча"}
+LANGUAGE_FLAGS: Mapping[str, str] = {"ru": "🇷🇺", "ky": "🇰🇬"}
 BUTTON_LABEL_LENGTH = 38
 
 
@@ -88,7 +99,7 @@ class Screen:
 
 @dataclass(frozen=True)
 class MenuSection:
-    """Раздел USSD-меню: цифра, двуязычное название и темы FAQ."""
+    """Раздел USSD-меню: цифра, название на двух языках и темы FAQ."""
 
     number: int
     icon: str
@@ -97,9 +108,13 @@ class MenuSection:
     title_ru: str
     faq_ids: tuple[int, ...]
 
+    def name(self, language: str = config.DEFAULT_LANGUAGE) -> str:
+        """Название раздела на одном языке — так печатается меню."""
+        return self.title_ky if language == "ky" else self.title_ru
+
     @property
     def title(self) -> str:
-        """Двуязычное название в одну строку."""
+        """Двуязычное название в одну строку. Только для экрана /start."""
         return f"{self.title_ky} · {self.title_ru}"
 
 
@@ -129,8 +144,23 @@ def _esc(text: str) -> str:
     return html.escape(text or "", quote=False)
 
 
+def _t(language: str, ru: str, ky: str) -> str:
+    """Служебная подпись на языке абонента: одна строка, без перевода.
+
+    Весь интерфейс печатается через этот помощник. Дублировать служебные
+    строки вторым языком нельзя: именно от этого экран раздувался вдвое,
+    а кнопка переключения языка ничего видимого не меняла.
+    """
+    return ky if language == "ky" else ru
+
+
 def _bi(ky: str, ru: str) -> str:
-    """Двуязычная подпись интерфейса в одну строку."""
+    """Двуязычная подпись в одну строку. Разрешена только на /start.
+
+    На `/start` язык абонента ещё неизвестен: первая реплика не пришла,
+    автоопределению нечего читать. Дальше язык известен — и дальше
+    работает :func:`_t`.
+    """
     return f"{ky} · {ru}"
 
 
@@ -169,11 +199,23 @@ def section_for_faq(faq_id: int) -> MenuSection | None:
     return None
 
 
-def _language_button(language: str) -> Button:
-    """Единственная кнопка переключения языка — на случай ошибки."""
-    other = "ru" if language == "ky" else "ky"
-    flag = "🇷🇺" if other == "ru" else "🇰🇬"
-    return Button(f"{flag} {LANGUAGE_NAMES[other]}", f"lang:{other}")
+def other_language(language: str) -> str:
+    """Второй язык интерфейса."""
+    return "ru" if language == "ky" else "ky"
+
+
+def _language_button(language: str, target: str = "menu") -> Button:
+    """Кнопка переключения языка, которая перерисовывает текущий экран.
+
+    `target` — адрес экрана, на котором стоит кнопка (`menu`, `help`,
+    `faq:4`). `bot.screen_for_action()` сначала запоминает выбранный язык,
+    потом снова собирает этот же экран. Поэтому нажатие 🇰🇬 на карточке
+    даёт тот же ответ по-кыргызски, а не меню новым сообщением: иначе
+    переключатель языка не виден в работе.
+    """
+    other = other_language(language)
+    action = f"lang:{other}:{target}" if target else f"lang:{other}"
+    return Button(f"{LANGUAGE_FLAGS[other]} {LANGUAGE_NAMES[other]}", action)
 
 
 def _menu_button() -> Button:
@@ -201,27 +243,32 @@ def _faq_buttons(entries: Iterable[FaqEntry], language: str,
 # --------------------------------------------------------------------------
 
 def menu_screen(language: str = config.DEFAULT_LANGUAGE,
-                pinned: bool = False) -> Screen:
-    """Главное меню: пронумерованные разделы, двуязычно в одну строку.
+                bilingual: bool = False) -> Screen:
+    """Главное меню: пронумерованные разделы на языке абонента.
 
-    `pinned` — язык выбран кнопкой. Состояние переключателя видно
-    строкой в меню, иначе выбор языка остаётся невидимым: сами разделы
-    двуязычны и выглядят одинаково на обоих языках.
+    `bilingual` печатает названия разделов на двух языках и нужен ровно
+    одному экрану — `/start`, где язык абонента ещё неизвестен.
+
+    Строки «язык ответов: Русский (определяется сам)» здесь больше нет:
+    она требовалась, пока смена языка ничего не меняла на экране. Теперь
+    меню само написано на выбранном языке, и подпись на кнопке говорит,
+    на какой язык переключит нажатие.
     """
-    lines = [
-        f"<b>{_bi('INAI Mobile колдоо кызматы', 'служба поддержки')}</b>",
-        _bi("Санды басыңыз же суроону жөн эле жазыңыз",
-            "нажмите цифру или просто напишите вопрос"),
-        language_status(language, pinned),
-        "",
-    ]
+    if bilingual:
+        # /start: язык неизвестен, поэтому и подсказка на двух языках, но
+        # покороче. Название бренда в переводе не нуждается.
+        title = "INAI Mobile"
+        hint = _bi("Санды басыңыз же суроону жазыңыз",
+                   "нажмите цифру или напишите вопрос")
+    else:
+        title = _t(language, "INAI Mobile · служба поддержки",
+                   "INAI Mobile · колдоо кызматы")
+        hint = _t(language, "Нажмите цифру или напишите вопрос своими словами",
+                  "Санды басыңыз же сурооңузду өз сөзүңүз менен жазыңыз")
+    lines = [f"<b>{_esc(title)}</b>", f"<i>{_esc(hint)}</i>", ""]
     for section in MENU_SECTIONS:
-        lines.append(f"{section.icon} <b>{section.number}</b>  "
-                     f"{_esc(section.title)}")
-    lines.append("")
-    free_input = _bi("Суроону өз сөзүңүз менен жазсаңыз болот",
-                     "вопрос можно написать своими словами")
-    lines.append(f"<i>{free_input}</i>")
+        name = section.title if bilingual else section.name(language)
+        lines.append(f"{section.icon} <b>{section.number}</b>  {_esc(name)}")
 
     rows: list[tuple[Button, ...]] = []
     buttons = [Button(f"{section.number}  {section.short}",
@@ -229,33 +276,42 @@ def menu_screen(language: str = config.DEFAULT_LANGUAGE,
                for section in MENU_SECTIONS if section.number != 0]
     for index in range(0, len(buttons), 2):
         rows.append(tuple(buttons[index:index + 2]))
-    rows.append((_operator_button(), _language_button(language)))
+    rows.append((_operator_button(), _language_button(language, "menu")))
     return Screen("\n".join(lines), tuple(rows))
 
 
-def start_screen(language: str = config.DEFAULT_LANGUAGE,
-                 pinned: bool = False) -> Screen:
-    """Экран /start: короткое приветствие и то же USSD-меню."""
-    menu = menu_screen(language, pinned=pinned)
+def start_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """Экран /start: приветствие и то же USSD-меню.
+
+    Единственный двуязычный экран бота. Абонент ещё ничего не написал,
+    определять язык не по чему, и встречать кыргызоязычного человека
+    русским приветствием только потому, что `ru` стоит по умолчанию, —
+    хуже, чем одна длинная строка.
+    """
+    menu = menu_screen(language, bilingual=True)
     greeting = _bi("Саламатсызбы!", "Здравствуйте!")
-    return Screen(f"{greeting}\n{menu.text}", menu.rows)
+    return Screen(f"👋 <b>{greeting}</b>\n{menu.text}", menu.rows)
 
 
 def section_screen(section: MenuSection, entries: Sequence[FaqEntry],
                    language: str = config.DEFAULT_LANGUAGE) -> Screen:
-    """Экран раздела: вопросы раздела кнопками, по-прежнему двуязычно."""
+    """Экран раздела: темы раздела списком и кнопками, на одном языке.
+
+    Раньше каждая тема печаталась дважды — вопрос на языке абонента и
+    под ним перевод. Для раздела из четырёх тем это восемь строк вместо
+    четырёх при той же пользе.
+    """
     chosen = [entry for entry in entries if entry.id in section.faq_ids]
     chosen.sort(key=lambda entry: section.faq_ids.index(entry.id))
-    other = "ru" if language == "ky" else "ky"
 
-    lines = [f"{section.icon} <b>{section.number}  {_esc(section.title)}</b>", ""]
+    lines = [f"{section.icon} <b>{section.number}  "
+             f"{_esc(section.name(language))}</b>", ""]
     for number, entry in enumerate(chosen, start=1):
         lines.append(f"<b>{number}</b>  {_esc(entry.question(language))}")
-        lines.append(f"<i>{_esc(entry.question(other))}</i>")
+    hint = _t(language, "или напишите своими словами",
+              "же өз сөзүңүз менен жазыңыз")
     lines.append("")
-    free_input = _bi("Же өз сөзүңүз менен жазыңыз",
-                     "или напишите своими словами")
-    lines.append(f"<i>{free_input}</i>")
+    lines.append(f"<i>{_esc(hint)}</i>")
 
     rows = list(_faq_buttons(chosen, language))
     rows.append((_menu_button(), _operator_button()))
@@ -269,98 +325,129 @@ def section_screen(section: MenuSection, entries: Sequence[FaqEntry],
 LEVEL_MARKS: Mapping[str, str] = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
 
 
-def ussd_block(codes: Sequence[str]) -> list[str]:
-    """Моноширинный блок с кодами плюс подсказка про копирование."""
+def ussd_block(codes: Sequence[str],
+               language: str = config.DEFAULT_LANGUAGE) -> list[str]:
+    """Моноширинный блок с кодами плюс подсказка про копирование.
+
+    Подсказка одна и на языке абонента: раньше она шла на двух языках и
+    занимала в карточке столько же места, сколько сам ответ.
+    """
     if not codes:
         return []
+    hint = _t(language, "нажмите на код, чтобы скопировать",
+              "кодду басып көчүрүңүз")
     lines = [f"<code>{_esc(code)}</code>" for code in codes]
-    hint = _bi("кодду басып көчүрүңүз", "нажмите на код, чтобы скопировать")
-    lines.append(f"<i>{hint}</i>")
+    lines.append(f"<i>{_esc(hint)}</i>")
     return lines
 
 
 def answer_card(reply: Reply) -> Screen:
-    """Двуязычная карточка ответа с учётом светофора уверенности.
+    """Карточка ответа на языке абонента с учётом светофора уверенности.
 
     🟢 — ответ сразу; 🟡 — ответ и «может быть, вы про это?» с кнопками;
     🔴 — ответа нет, только три похожих вопроса кнопками.
+
+    Второго перевода в карточке нет: ТЗ требует отвечать на языке
+    вопроса, а не на двух сразу. Если язык определился неверно, абонент
+    нажимает 🇰🇬/🇷🇺 — и эта же карточка перерисовывается на другом языке.
     """
     if reply.level == "red" or reply.entry is None:
         return not_found_card(reply)
 
     entry = reply.entry
-    language = reply.lang if reply.lang in config.LANGUAGES else config.DEFAULT_LANGUAGE
-    other = "ru" if language == "ky" else "ky"
+    language = (reply.lang if reply.lang in config.LANGUAGES
+                else config.DEFAULT_LANGUAGE)
+    other = other_language(language)
     mark = LEVEL_MARKS[reply.level]
 
-    lines = [f"{mark} <b>{_esc(entry.question(language))}</b>", ""]
+    lines = [f"{mark} <b>{_esc(entry.question(language))}</b>"]
     if reply.inherited_from_context:
-        carried = _bi("мурунку тема боюнча", "по предыдущей теме")
-        lines.insert(1, f"<i>↪ {carried}</i>")
+        carried = _t(language, "по предыдущей теме", "мурунку тема боюнча")
+        lines.append(f"<i>↪ {_esc(carried)}</i>")
+    lines.append("")
     lines.append(_esc(entry.answer(language)))
 
+    # Код ищем в обоих переводах: в кыргызском тексте темы он иногда
+    # записан, а в русском — нет, и наоборот.
     codes = extract_ussd_codes(entry.answer(language), entry.answer(other))
     if codes:
         lines.append("")
-        lines.extend(ussd_block(codes))
-
-    lines.append("")
-    lines.append(f"<i>{LANGUAGE_NAMES[other]}: {_esc(entry.answer(other))}</i>")
+        lines.extend(ussd_block(codes, language))
 
     rows: list[tuple[Button, ...]] = []
     others = [item for item in reply.suggestion_entries if item.id != entry.id]
     if reply.level == "yellow" and others:
+        maybe = _t(language, "может быть, вы про это?",
+                   "балким, бул жөнүндөбү?")
         lines.append("")
-        maybe = _bi("Балким, бул жөнүндөбү?", "может быть, вы про это?")
-        lines.append(f"🟡 <i>{maybe}</i>")
+        lines.append(f"🟡 <i>{_esc(maybe)}</i>")
         rows.extend(_faq_buttons(others[:config.TOP_K - 1], language))
 
     rows.append((
-        Button(_bi("✅ Түшүнүктүү", "Понятно"), "ack"),
-        Button(_bi("✍️ Башка суроо", "Другой вопрос"), "another"),
+        Button(_t(language, "✅ Понятно", "✅ Түшүндүм"), "ack"),
+        Button(_t(language, "✍️ Другой вопрос", "✍️ Башка суроо"), "another"),
     ))
-    rows.append((_menu_button(), _language_button(language)))
+    rows.append((_menu_button(),
+                 _language_button(language, f"faq:{entry.id}")))
     return Screen("\n".join(lines), tuple(rows))
 
 
 def not_found_card(reply: Reply) -> Screen:
-    """🔴 Ответа нет: честный отказ и три похожих вопроса кнопками."""
-    language = reply.lang if reply.lang in config.LANGUAGES else config.DEFAULT_LANGUAGE
-    suggestions = list(reply.suggestion_entries)[:config.TOP_K]
+    """🔴 Ответа нет: честный отказ и три похожих вопроса кнопками.
 
-    lines = [f"🔴 <b>{_bi('Так жообун таппадым', 'Точного ответа не нашёл')}</b>", ""]
+    Это один из трёх случаев, когда уместно полное меню, — но только
+    если не нашлось даже похожих вопросов. Когда они есть, меню было бы
+    шумом: выбирать нужно из них.
+    """
+    language = (reply.lang if reply.lang in config.LANGUAGES
+                else config.DEFAULT_LANGUAGE)
+    suggestions = list(reply.suggestion_entries)[:config.TOP_K]
+    head = _t(language, "Точного ответа не нашёл", "Так жообун таппадым")
+
+    lines = [f"🔴 <b>{_esc(head)}</b>"]
     if suggestions:
-        lines.append(_bi("Окшош суроолордон тандаңыз",
-                         "выберите похожий вопрос"))
-        lines.append(_bi("же башкача жазыңыз", "или напишите иначе"))
+        hint = _t(language, "Выберите похожий вопрос или напишите иначе",
+                  "Окшош суроону тандаңыз же башкача жазыңыз")
+        lines.append(f"<i>{_esc(hint)}</i>")
         lines.append("")
         for number, entry in enumerate(suggestions, start=1):
             lines.append(f"<b>{number}</b>  {_esc(entry.question(language))}")
-    else:
-        lines.append(_bi("Менюдан бөлүмдү тандаңыз",
-                         "выберите раздел в меню"))
-        lines.append(_bi("же башкача жазыңыз", "или напишите иначе"))
+        rows = list(_faq_buttons(suggestions, language))
+        rows.append((_menu_button(), _operator_button()))
+        return Screen("\n".join(lines), tuple(rows))
 
-    rows = list(_faq_buttons(suggestions, language))
-    rows.append((_menu_button(), _operator_button()))
-    return Screen("\n".join(lines), tuple(rows))
+    hint = _t(language, "Выберите раздел или напишите иначе",
+              "Бөлүмдү тандаңыз же башкача жазыңыз")
+    menu = menu_screen(language)
+    lines.append(f"<i>{_esc(hint)}</i>")
+    lines.append("")
+    lines.append(menu.text)
+    return Screen("\n".join(lines), menu.rows)
 
 
 def acknowledged_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
-    """Короткий экран после кнопки «Понятно»."""
-    text = (f"✅ <b>{_bi('Жакшы!', 'Отлично!')}</b>\n"
-            + _bi("Дагы суроо болсо жазыңыз", "если будет ещё вопрос — напишите"))
+    """Экран после кнопки «Понятно»: одна строка, без кнопок и без меню.
+
+    Карточка сворачивается в подтверждение прямо на своём месте —
+    нового сообщения не отправляется. Раньше одно касание «Понятно»
+    давало две лишних простыни: короткий ответ и следом полное меню.
+    """
+    text = _t(language, "✅ Готово. Будет ещё вопрос — просто напишите.",
+              "✅ Болду. Дагы суроо болсо, жөн эле жазыңыз.")
+    return Screen(text)
+
+
+def another_question_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """Экран после кнопки «Другой вопрос»: контекст темы сброшен.
+
+    Полного меню здесь нет намеренно: абонент только что сказал, что
+    хочет спросить своими словами. Меню — одной кнопкой.
+    """
+    head = _t(language, "Новый вопрос", "Жаңы суроо")
+    hint = _t(language, "Напишите его своими словами или откройте меню",
+              "Сурооңузду өз сөзүңүз менен жазыңыз же менюну ачыңыз")
+    text = f"✍️ <b>{_esc(head)}</b>\n<i>{_esc(hint)}</i>"
     return Screen(text, ((_menu_button(), _operator_button()),))
-
-
-def another_question_screen(language: str = config.DEFAULT_LANGUAGE,
-                            pinned: bool = False) -> Screen:
-    """Экран после кнопки «Другой вопрос»: контекст темы сброшен."""
-    text = (f"✍️ <b>{_bi('Жаңы суроо', 'Новый вопрос')}</b>\n"
-            + _bi("Суроону жазыңыз же менюдан тандаңыз",
-                  "напишите вопрос или выберите раздел"))
-    menu = menu_screen(language, pinned=pinned)
-    return Screen(f"{text}\n\n{menu.text}", menu.rows)
 
 
 def operator_screen(entry: FaqEntry | None,
@@ -370,38 +457,37 @@ def operator_screen(entry: FaqEntry | None,
 
     `reason` — код причины из конфига: видно и абоненту, и в /stats.
     """
-    lines = [f"🧑‍💼 <b>{_bi('Оператор', 'Оператор')}</b>", ""]
+    lines = ["🧑‍💼 <b>Оператор</b>"]
     if reason:
-        lines.insert(1, f"<i>{_esc(reason_label(reason))}</i>")
+        lines.append(f"<i>{_esc(reason_label(reason, language))}</i>")
     if entry is not None:
-        other = "ru" if language == "ky" else "ky"
-        lines.append(_esc(entry.answer(language)))
         lines.append("")
-        lines.append(f"<i>{LANGUAGE_NAMES[other]}: {_esc(entry.answer(other))}</i>")
+        lines.append(_esc(entry.answer(language)))
+    note = _t(language, "обращение помечено для оператора",
+              "кайрылууңуз операторго белгиленди")
     lines.append("")
-    note = _bi("Кайрылууңуз операторго белгиленди",
-               "обращение помечено для оператора")
-    lines.append(f"<i>{note}</i>")
+    lines.append(f"<i>{_esc(note)}</i>")
     return Screen("\n".join(lines), ((_menu_button(),),))
 
 
-def help_screen(language: str = config.DEFAULT_LANGUAGE,
-                pinned: bool = False) -> Screen:
-    """Справка по командам."""
+def help_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """Справка по командам, на языке абонента."""
+    head = _t(language, "Помощь", "Жардам")
+    stats = _t(language, "неотвеченные вопросы", "жооп табылбаган суроолор")
+    reset = _t(language, "сбросить тему и язык", "теманы жана тилди тазалоо")
+    hint = _t(language, "Вопрос можно писать своими словами",
+              "Сурооңузду өз сөзүңүз менен жазсаңыз болот")
     lines = [
-        f"<b>{_bi('Жардам', 'Помощь')}</b>",
+        f"<b>{_esc(head)}</b>",
         "",
-        "/start — " + _bi("меню", "меню"),
-        "/stats — " + _bi("жооп табылбаган суроолор", "неотвеченные вопросы"),
-        "/reset — " + _bi("теманы жана тилди тазалоо",
-                          "сбросить тему и выбранный язык"),
+        "/start — " + _esc(_t(language, "меню", "меню")),
+        "/stats — " + _esc(stats),
+        "/reset — " + _esc(reset),
         "",
-        language_status(language, pinned),
-        "",
-        _bi("Суроону кыргызча же орусча жазыңыз",
-            "напишите вопрос по-кыргызски или по-русски"),
+        f"<i>{_esc(hint)}</i>",
     ]
-    return Screen("\n".join(lines), ((_menu_button(), _language_button(language)),))
+    return Screen("\n".join(lines),
+                  ((_menu_button(), _language_button(language, "help")),))
 
 
 # --------------------------------------------------------------------------
@@ -413,48 +499,55 @@ def stats_screen(snapshot: StatsSnapshot,
                  language: str = config.DEFAULT_LANGUAGE) -> Screen:
     """Агрегат неотвеченных вопросов. Чужих персональных данных здесь нет."""
     titles = {entry.id: entry.question(language) for entry in entries}
-    title = _bi("Жооп табылбаган суроолор", "Неотвеченные вопросы")
-    lines = [f"📊 <b>{title}</b>", ""]
+    title = _t(language, "Неотвеченные вопросы", "Жооп табылбаган суроолор")
+    lines = [f"📊 <b>{_esc(title)}</b>", ""]
 
-    if not snapshot.total:
-        lines.append(_bi("Азырынча суроолор жок", "пока вопросов не было"))
+    if not snapshot.total and not snapshot.operator_reasons:
+        lines.append(_t(language, "пока вопросов не было",
+                        "азырынча суроолор жок"))
         return Screen("\n".join(lines), ((_menu_button(),),))
 
-    share = f"{snapshot.unanswered_share:.0%}"
-    lines.append(f"{_bi('Баары', 'всего вопросов')}: <b>{snapshot.total}</b>")
-    lines.append(f"{_bi('Жооп табылды', 'найден ответ')}: {snapshot.answered}")
-    lines.append(f"{_bi('Табылган жок', 'без ответа')}: "
-                 f"<b>{snapshot.unanswered}</b> ({share})")
+    if snapshot.total:
+        share = f"{snapshot.unanswered_share:.0%}"
+        lines.append(f"{_t(language, 'всего вопросов', 'баары')}: "
+                     f"<b>{snapshot.total}</b>")
+        lines.append(f"{_t(language, 'найден ответ', 'жооп табылды')}: "
+                     f"{snapshot.answered}")
+        lines.append(f"{_t(language, 'без ответа', 'табылган жок')}: "
+                     f"<b>{snapshot.unanswered}</b> ({share})")
     if snapshot.by_language:
         languages = " · ".join(f"{name} {count}"
                                for name, count in snapshot.by_language.items())
-        lines.append(f"{_bi('Тилдер', 'языки')}: {languages}")
+        lines.append(f"{_t(language, 'языки', 'тилдер')}: {languages}")
 
     if snapshot.nearest_topics:
+        header = _t(language, "чаще всего не находились темы",
+                    "эң көп табылбаган темалар")
         lines.append("")
-        header = _bi("Жакын темалар", "чаще всего не находились темы")
-        lines.append(f"<b>{header}</b>")
+        lines.append(f"<b>{_esc(header)}</b>")
         for faq_id, count in snapshot.nearest_topics:
             title = titles.get(faq_id, f"FAQ {faq_id}")
             lines.append(f"  • {faq_id} · {_esc(_short(title, 48))} — {count}")
 
     if snapshot.examples:
+        header = _t(language, "примеры формулировок", "мисалдар")
         lines.append("")
-        lines.append(f"<b>{_bi('Мисалдар', 'примеры формулировок')}</b>")
+        lines.append(f"<b>{_esc(header)}</b>")
         for example in snapshot.examples:
             lines.append(f"  • «{_esc(example)}»")
 
     if snapshot.operator_reasons:
+        header = _t(language, "передано оператору", "операторго өттү")
         lines.append("")
-        header = _bi("Операторго өтүү", "передано оператору")
-        lines.append(f"<b>{header}</b>: {snapshot.operator_total}")
+        lines.append(f"<b>{_esc(header)}</b>: {snapshot.operator_total}")
         for reason, count in snapshot.operator_reasons:
-            lines.append(f"  • {_esc(reason_label(reason))} — {count}")
+            lines.append(f"  • {_esc(reason_label(reason, language))} "
+                         f"— {count}")
 
+    footer = _t(language, "только агрегат, без персональных данных",
+                "жалпы сандар, жеке маалыматсыз")
     lines.append("")
-    footer = _bi("Жалпы сандар, жеке маалыматсыз",
-                 "только агрегат, без персональных данных")
-    lines.append(f"<i>{footer}</i>")
+    lines.append(f"<i>{_esc(footer)}</i>")
     return Screen("\n".join(lines), ((_menu_button(),),))
 
 
@@ -482,11 +575,16 @@ DEFAULT_RULES: Mapping[str, Any] = {
         "escalation_words": ("жалоб", "претензи", "арыз", "возврат",
                              "обман", "мошенн", "украл"),
         "reason_labels": {
-            "direct_request": "🙋 Попросили оператора",
-            "complaint": "⚠️ Жалоба или претензия",
-            "refund": "💸 Возврат средств",
-            "out_of_base": "❓ Вопрос вне базы знаний",
-            "repeated_miss": "🔁 Бот не понял несколько раз подряд",
+            "direct_request": {"ru": "🙋 Попросили оператора",
+                               "ky": "🙋 Оператор сурадыңыз"},
+            "complaint": {"ru": "⚠️ Жалоба или претензия",
+                          "ky": "⚠️ Арыз же нааразычылык"},
+            "refund": {"ru": "💸 Возврат средств",
+                       "ky": "💸 Акчаны кайтаруу"},
+            "out_of_base": {"ru": "❓ Вопрос вне базы знаний",
+                            "ky": "❓ База сыртындагы суроо"},
+            "repeated_miss": {"ru": "🔁 Бот не понял несколько раз подряд",
+                              "ky": "🔁 Бот бир нече жолу түшүнбөдү"},
         },
         "repeated_miss_threshold": 3,
     },
@@ -539,6 +637,12 @@ DEFAULT_RULES: Mapping[str, Any] = {
             "ru": "Похоже, я не понимаю вопрос. Давайте позову оператора.",
             "ky": "Сурооңузду түшүнбөй жатам окшойт. Операторду чакырайын.",
         },
+        "escalated": {
+            "ru": "Такие обращения решает оператор. Инструкция выше, "
+                  "обращение я помечаю для человека.",
+            "ky": "Мындай кайрылууларды оператор чечет. Жогоруда көрсөтмө "
+                  "бар, кайрылууңузду адамга белгиледим.",
+        },
         "language_switched": {
             "ru": "Готово, отвечаю по-русски. Переключить обратно можно "
                   "кнопкой.",
@@ -572,7 +676,7 @@ class OperatorRules:
     faq_id: int
     direct_words: tuple[str, ...]
     escalation_words: tuple[str, ...]
-    reason_labels: Mapping[str, str]
+    reason_labels: Mapping[str, Mapping[str, str]]
     repeated_miss_threshold: int
 
 
@@ -623,13 +727,35 @@ def _positive(value: Any, fallback: float) -> float:
     return number if number > 0 else float(fallback)
 
 
-def _labels(value: Any, fallback: Mapping[str, str]) -> Mapping[str, str]:
-    """Подписи причин: значения менять можно, ключи обязательны."""
-    merged = dict(fallback)
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            if isinstance(item, str) and item.strip():
-                merged[str(key)] = item.strip()
+def _labels(value: Any, fallback: Mapping[str, Mapping[str, str]],
+            ) -> Mapping[str, Mapping[str, str]]:
+    """Подписи причин: значения менять можно, ключи обязательны.
+
+    У подписи два перевода — экран печатается на одном языке, и
+    кыргызская карточка не имеет права кончаться русской строкой. Одна
+    строка вместо пары тоже принимается: тогда она идёт на оба языка.
+    Так старый конфиг продолжает работать.
+    """
+    merged: dict[str, Mapping[str, str]] = {
+        key: dict(item) for key, item in fallback.items()
+    }
+    if not isinstance(value, Mapping):
+        return merged
+    for key, item in value.items():
+        name = str(key)
+        if isinstance(item, str) and item.strip():
+            merged[name] = {language: item.strip()
+                            for language in config.LANGUAGES}
+            continue
+        if not isinstance(item, Mapping):
+            continue
+        texts = {language: str(item.get(language, "")).strip()
+                 for language in config.LANGUAGES}
+        known = dict(merged.get(name, {}))
+        known.update({language: text for language, text in texts.items()
+                      if text})
+        if known:
+            merged[name] = known
     return merged
 
 
@@ -769,9 +895,14 @@ def message(name: str, language: str = config.DEFAULT_LANGUAGE) -> str:
     return texts.get(language) or texts.get(config.DEFAULT_LANGUAGE, "")
 
 
-def reason_label(reason: str) -> str:
+def reason_label(reason: str,
+                 language: str = config.DEFAULT_LANGUAGE) -> str:
     """Подпись причины передачи оператору (карточка и /stats)."""
-    return rules().operator.reason_labels.get(reason, reason)
+    texts = rules().operator.reason_labels.get(reason, {})
+    if language not in config.LANGUAGES:
+        language = config.DEFAULT_LANGUAGE
+    return (texts.get(language) or texts.get(config.DEFAULT_LANGUAGE)
+            or reason)
 
 
 # --------------------------------------------------------------------------
@@ -822,25 +953,51 @@ def matches_pattern(text: str, pattern: str) -> bool:
     return any(word.startswith(needle) for word in words)
 
 
+def _without_pattern(text: str, pattern: str) -> str:
+    """Что осталось от реплики, если вычеркнуть совпавшую фразу.
+
+    Остаток проверяется на ключевые слова темы, поэтому вычёркиваем по
+    исходным словам, а не по сглаженной строке: буквы ң, ө, ү нужны,
+    чтобы узнать «мүнөт» и «бөгөт» в остатке.
+    """
+    needle = fold(pattern)
+    needle_words = set(needle.split())
+    kept: list[str] = []
+    for word in text.split():
+        folded_word = fold(word)
+        if not folded_word or folded_word in needle_words:
+            continue
+        if (" " not in needle and len(needle) > EXACT_MATCH_LENGTH
+                and folded_word.startswith(needle)):
+            continue
+        kept.append(word)
+    return " ".join(kept)
+
+
 def detect_intent(text: str) -> str | None:
     """Приветствие, вопрос о боте, благодарность, прощание — или None.
 
     Ветка живёт только в слое бота и срабатывает только на короткой
-    реплике без собственных ключевых слов темы: «салам» получает
-    приветствие, «салам, интернет иштебейт» — обычный поиск по базе.
+    реплике, в которой, кроме самой болтовни, нет ключевых слов темы:
+    «салам» получает приветствие, «салам, интернет иштебейт» — обычный
+    поиск по базе. Проверяется именно остаток реплики: «добрый день»
+    целиком является приветствием, хотя слово «день» похоже на начало
+    тематического «деньги».
+
     Функция `answer()` об этой ветке не знает и по-прежнему отдаёт
     `faq_id = null`: так требует спецификация.
     """
     words = fold(text).split()
     if not words or len(words) > INTENT_MAX_WORDS:
         return None
-    if mentions_topic(text):
-        return None
     lists = rules().detection
     for kind in INTENT_KINDS:
         for pattern in lists.get(kind, ()):
-            if matches_pattern(text, pattern):
-                return kind
+            if not matches_pattern(text, pattern):
+                continue
+            if mentions_topic(_without_pattern(text, pattern)):
+                return None
+            return kind
     return None
 
 
@@ -869,44 +1026,24 @@ def operator_reason(text: str) -> str | None:
 # Экраны для реплик вне базы и служебных уведомлений
 # --------------------------------------------------------------------------
 
-def bilingual_message(name: str,
-                      language: str = config.DEFAULT_LANGUAGE) -> str:
-    """Текст конфига: язык реплики крупно, второй язык курсивом.
-
-    Так же устроена карточка ответа: абонент видит обе версии, даже если
-    язык определился неверно.
-    """
-    if language not in config.LANGUAGES:
-        language = config.DEFAULT_LANGUAGE
-    other = "ru" if language == "ky" else "ky"
-    main = message(name, language)
-    second = message(name, other)
-    lines = [_esc(main)]
-    if second and second != main:
-        lines.append("")
-        lines.append(f"<i>{_esc(second)}</i>")
-    return "\n".join(lines)
-
-
-def smalltalk_screen(kind: str, language: str = config.DEFAULT_LANGUAGE,
-                     pinned: bool = False) -> Screen:
+def smalltalk_screen(kind: str,
+                     language: str = config.DEFAULT_LANGUAGE) -> Screen:
     """Ответ на приветствие или болтовню вместо «ответа не нашёл».
 
-    Приветствие и вопрос о боте идут вместе с меню: разговор только
-    начался. Благодарность и прощание — коротко, меню не навязываем.
+    Полного меню здесь больше нет: на «салам» приходило приветствие
+    и сразу шесть пунктов меню, то есть восемнадцать строк на одно
+    слово. Меню — одной кнопкой, а язык приветствия уже известен: его
+    определили по самой реплике.
     """
     icon = INTENT_ICONS.get(kind, "💬")
-    text = f"{icon} {bilingual_message(kind, language)}"
-    if kind in ("greeting", "about_bot"):
-        menu = menu_screen(language, pinned=pinned)
-        return Screen(f"{text}\n\n{menu.text}", menu.rows)
+    text = f"{icon} {_esc(message(kind, language))}"
     return Screen(text, ((_menu_button(), _operator_button()),))
 
 
 def notice_screen(name: str, language: str = config.DEFAULT_LANGUAGE,
                   with_menu: bool = True) -> Screen:
     """Служебное уведомление: слишком длинно, слишком часто, не понял."""
-    text = f"ℹ️ {bilingual_message(name, language)}"
+    text = f"ℹ️ {_esc(message(name, language))}"
     if not with_menu:
         return Screen(text)
     return Screen(text, ((_menu_button(), _operator_button()),))
@@ -914,32 +1051,32 @@ def notice_screen(name: str, language: str = config.DEFAULT_LANGUAGE,
 
 def language_switched_screen(
         language: str = config.DEFAULT_LANGUAGE) -> Screen:
-    """Подтверждение выбора языка кнопкой и меню с видимым состоянием."""
-    menu = menu_screen(language, pinned=True)
-    flag = "🇰🇬" if language == "ky" else "🇷🇺"
+    """Меню на выбранном языке плюс строка подтверждения.
+
+    Нужен там, где переключатель нажали на самом меню: сравнивать не с
+    чем, поэтому одна строка говорит, что произошло. На карточке ответа
+    подтверждение не нужно — там виден тот же ответ на другом языке.
+    """
+    menu = menu_screen(language)
+    flag = LANGUAGE_FLAGS.get(language, "🌐")
     head = f"{flag} <b>{_esc(message('language_switched', language))}</b>"
-    return Screen(f"{head}\n\n{menu.text}", menu.rows)
-
-
-def language_status(language: str = config.DEFAULT_LANGUAGE,
-                    pinned: bool = False) -> str:
-    """Строка состояния переключателя языка: что выбрано и каким образом."""
-    name = LANGUAGE_NAMES.get(language, LANGUAGE_NAMES["ru"])
-    how = (_bi("баскыч менен", "выбран кнопкой") if pinned
-           else _bi("автоматта", "определяется сам"))
-    return f"🌐 {_bi('Жооп тили', 'язык ответов')}: <b>{name}</b> ({how})"
+    return Screen(f"{head}\n{menu.text}", menu.rows)
 
 
 def with_operator_offer(screen: Screen,
                         language: str = config.DEFAULT_LANGUAGE,
-                        reason: str = "repeated_miss") -> Screen:
-    """Добавить к экрану предложение позвать оператора.
+                        reason: str = "repeated_miss",
+                        note: str = "repeated_miss") -> Screen:
+    """Добавить к экрану причину и предложение позвать оператора.
 
-    Нужно после нескольких отказов подряд: абонента, которого не поняли
-    трижды, нельзя заставлять самому искать кнопку.
+    Нужно в двух случаях: бот не понял несколько раз подряд, или ответ
+    из базы нашёлся, но ситуация всё равно для человека — жалоба,
+    возврат, кража. Во втором случае абонент получает и инструкцию из
+    `faq.json`, и передачу оператору, а не одно вместо другого.
     """
-    label = reason_label(reason)
+    label = reason_label(reason, language)
     text = (f"{screen.text}\n\n{_esc(label)}\n"
-            f"{bilingual_message('repeated_miss', language)}")
-    call = Button(_bi("🧑‍💼 Операторго", "Позвать оператора"), "operator")
+            f"<i>{_esc(message(note, language))}</i>")
+    call = Button(_t(language, "🧑‍💼 Позвать оператора", "🧑‍💼 Операторго"),
+                  "operator")
     return Screen(text, tuple(screen.rows) + ((call,),), screen.parse_mode)

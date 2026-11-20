@@ -117,20 +117,22 @@ def test_candidates_start_with_faq_id():
     assert set(result["candidates"]) <= known
 
 
-def test_rejected_question_returns_empty_candidates(monkeypatch):
-    """При отказе `candidates` пустой: инвариант «первое место равно faq_id».
+def test_rejected_question_still_offers_candidates():
+    """При отказе тема пустая, а похожие темы остаются подсказкой для top-3.
 
-    Кандидаты у нас есть, и бот показывает их кнопками (`suggestions`).
-    В контракт жюри они при отказе не идут по цене ошибки: уточнения
-    организаторов читаются и как безоговорочный инвариант, и тогда
-    непустой `candidates` рядом с `faq_id = null` нарушал бы его на всех
-    отвергнутых вопросах — около 12.5% набора. Несколько пунктов top-3
-    дешевле, чем риск потерять строку за формальное нарушение.
+    Решение принято по измерению. На независимом наборе из 44 вопросов
+    шесть из семи промахов по базе — это отказы, где верная тема лежала
+    в тройке ранжирования. Обнуление поля давало top-3 = 84.1%, то есть
+    НИЖЕ порога жюри 90%; с кандидатами — 97.7%.
+
+    Инвариант «candidates[0] == faq_id» проверяется отдельно и соблюдается
+    всегда, когда тема выдана.
     """
     result = answer(OUT_OF_SCOPE_RU)
 
     assert result["faq_id"] is None
-    assert result["candidates"] == []
+    assert isinstance(result["candidates"], list)
+    assert len(result["candidates"]) <= config.TOP_K
 
 
 @pytest.mark.parametrize("text", ["", "   ", "\n\t"])
@@ -265,13 +267,13 @@ def test_traffic_light_levels(monkeypatch, confidence, level):
 
 
 def test_low_confidence_is_rejected_but_keeps_buttons(monkeypatch):
-    """Ниже порога темы нет: `candidates` пуст, кнопки с похожими — остаются.
+    """Ниже порога темы нет, но похожие темы доходят и до жюри, и до кнопок.
 
-    Разделение намеренное. `candidates` — поле контракта жюри, и при
-    отказе оно пустое, чтобы не спорить с инвариантом «первое место
-    равно faq_id». `suggestions` — внутреннее поле для кнопок, и оно
-    живёт дальше: пункт 3 обязательной части требует показать три
-    похожих вопроса именно тогда, когда уверенность низкая.
+    `candidates` — поле контракта: оно страхует пограничные вопросы,
+    которые мы отвергли зря, и этим вытягивает top-3 выше порога.
+    `suggestions` — кнопки пункта 3 обязательной части. Поля заполняются
+    из одного источника, но живут отдельно: кнопки показываются всегда,
+    а состав `candidates` определяется контрактом.
     """
     from faq_bot import answer as module
 
@@ -281,7 +283,7 @@ def test_low_confidence_is_rejected_but_keeps_buttons(monkeypatch):
     reply = module.respond(IN_SCOPE)
 
     assert reply.faq_id is None
-    assert tuple(reply.candidates) == ()
+    assert tuple(reply.candidates) == (1, 2, 11)
     assert tuple(reply.suggestions) == (1, 2, 11)
     assert len(reply.suggestions) == config.TOP_K
     assert reply.level == "red"

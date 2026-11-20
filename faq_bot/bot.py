@@ -13,6 +13,18 @@
 `screen_for_action()`. Они не знают про Telegram, поэтому поведение кнопок
 проверяется обычными тестами.
 
+Главное правило переписки, из которого следует всё остальное:
+
+* **новый текст абонента** — новое сообщение в чат (`_send()`);
+* **нажатие кнопки** — правка того сообщения, в котором эта кнопка
+  (`_edit()` поверх `edit_message_text`), плюс обязательный
+  `answer_callback_query`, чтобы на кнопке не крутились часики.
+
+До этого каждое касание присылало новое сообщение — «Понятно» давало
+подтверждение и следом полное меню, то есть три сообщения на одно
+касание. За минуту живого теста чат превращался в простыню из двадцати
+сообщений, в которой не найти сам ответ.
+
 Чем занимается именно этот слой (и не занимается `answer()`).
 
 * **Защита от флуда.** `ThrottleGuard` ограничивает число ответов на чат
@@ -25,7 +37,9 @@
   `answer()` по-прежнему отдаёт на такие реплики `faq_id = null` —
   так требует спецификация, и по ней считается автопроверка.
 * **Язык.** Выбор языка кнопкой сохраняется для чата и перебивает
-  автоопределение; правило спора описано у `reply_language()`.
+  автоопределение; правило спора описано у `reply_language()`. Экран
+  печатается на одном языке, а кнопка 🇰🇬/🇷🇺 перерисовывает его же на
+  другом — см. `_language_screen()`.
 
 Тексты ответов, списки слов и пороги лежат в `faq_bot/bot_rules.json`
 и читаются через `presentation.rules()`.
@@ -381,6 +395,11 @@ class MessageBuffer:
         """Сколько реплик чата ждут отправки (для тестов и отладки)."""
         return len(self._parts.get(_key(chat_id), ()))
 
+    async def drain(self) -> None:
+        """Дождаться всех отложенных ответов. Нужно тестам и остановке."""
+        while self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
+
     def clear(self) -> None:
         """Забыть буферы всех чатов и снять ожидающие задачи."""
         self._parts.clear()
@@ -402,12 +421,22 @@ def buffer() -> MessageBuffer:
 
 
 def reset_runtime_state() -> None:
-    """Забыть всё состояние слоя бота: язык, троттлинг, буферы, тему."""
+    """Забыть всё состояние слоя бота: язык, троттлинг, буферы, тему.
+
+    Ограничитель и буфер пересоздаются, а не просто чистятся: тест мог
+    подменить их своими порогами и часами, и это не должно протекать
+    в следующий тест.
+    """
+    global _throttle, _buffer
     _chat_language.clear()
     _chat_language_pinned.clear()
     _chat_language_streak.clear()
-    throttle().clear()
-    buffer().clear()
+    if _throttle is not None:
+        _throttle.clear()
+        _throttle = None
+    if _buffer is not None:
+        _buffer.clear()
+        _buffer = None
     reset_context()
 
 
@@ -443,9 +472,8 @@ def screen_for_text(text: str,
     """
     stripped = (text or "").strip()
     language = reply_language(chat_id, stripped)
-    pinned = is_language_pinned(chat_id)
     if not stripped:
-        return presentation.menu_screen(language, pinned=pinned)
+        return presentation.menu_screen(language)
 
     verdict = throttle().check(chat_id)
     if verdict == "mute":
@@ -471,16 +499,29 @@ def screen_for_text(text: str,
                                                language)
 
     reason = presentation.operator_reason(stripped)
-    if reason is not None:
+    if reason == "direct_request":
         return _operator_screen(chat_id, reason, language)
 
     intent = presentation.detect_intent(stripped)
     if intent is not None:
-        return presentation.smalltalk_screen(intent, language, pinned=pinned)
+        return presentation.smalltalk_screen(intent, language)
 
     reply = respond(stripped, chat_id=chat_id, language=language)
     set_chat_language(chat_id, reply.lang)
     screen = presentation.answer_card(reply)
+
+    if reason is not None:
+        # Жалоба, возврат, кража. Если тема в базе всё-таки нашлась
+        # («украли телефон, блокируйте сим» — это тема 13), абонент
+        # получает инструкцию из faq.json И передачу человеку. Инструкция
+        # вместо человека была бы формальной отпиской, человек вместо
+        # инструкции — потерей готового ответа.
+        if reply.faq_id is None:
+            return _operator_screen(chat_id, reason, reply.lang)
+        STATS.record_operator(reason, chat_id)
+        return presentation.with_operator_offer(screen, reply.lang, reason,
+                                                "escalated")
+
     if reply.faq_id is None:
         screen = _maybe_offer_operator(screen, chat_id, reply.lang)
     return screen
@@ -504,21 +545,29 @@ def screen_for_action(action: str, chat_id: int | str | None = None) -> Screen:
 
     Нажатие `faq:<id>` обязано выдать ответ именно по этой теме — это
     пункт 3 обязательной части.
+
+    Экран подменяет собой сообщение, в котором стоит кнопка: раздел меню
+    превращается в список тем, тема — в карточку ответа, «Понятно» — в
+    одну строку подтверждения. Новых сообщений при этом не появляется,
+    этим занимается :func:`_on_button`.
+
+    Отдельный случай — `lang:<ru|ky>:<адрес экрана>`. Язык запоминается
+    за чатом, после чего тот же экран собирается заново на новом языке:
+    абонент видит тот же ответ по-кыргызски, а не меню вместо ответа.
     """
     command, _, argument = (action or "").partition(":")
     language = chat_language(chat_id)
-    pinned = is_language_pinned(chat_id)
 
     if command == "faq" and argument.isdigit():
         reply = reply_for_faq_id(int(argument), language, chat_id=chat_id)
         if reply is not None:
             return presentation.answer_card(reply)
-        return presentation.menu_screen(language, pinned=pinned)
+        return presentation.menu_screen(language)
 
     if command == "section" and argument.isdigit():
         section = presentation.section_by_number(int(argument))
         if section is None:
-            return presentation.menu_screen(language, pinned=pinned)
+            return presentation.menu_screen(language)
         if section.number == 0:
             return _operator_screen(chat_id, "direct_request", language)
         return presentation.section_screen(section, all_entries(), language)
@@ -529,13 +578,34 @@ def screen_for_action(action: str, chat_id: int | str | None = None) -> Screen:
         return presentation.acknowledged_screen(language)
     if command == "another":
         reset_context(chat_id)
-        return presentation.another_question_screen(language, pinned=pinned)
-    if command == "lang" and argument in config.LANGUAGES:
-        set_chat_language(chat_id, argument, pinned=True)
-        return presentation.language_switched_screen(argument)
+        return presentation.another_question_screen(language)
+    if command == "help":
+        return presentation.help_screen(language)
+    if command == "lang":
+        return _language_screen(argument, chat_id, language)
     if command == "stats":
         return stats_screen(chat_id)
-    return presentation.menu_screen(language, pinned=pinned)
+    return presentation.menu_screen(language)
+
+
+def _language_screen(argument: str, chat_id: int | str | None,
+                     language: str) -> Screen:
+    """Переключить язык чата и перерисовать тот же экран на новом языке.
+
+    `argument` — это `<код языка>` или `<код языка>:<адрес экрана>`,
+    например `ky:faq:4`. Адрес кладёт в кнопку сама `presentation`, так
+    что состояние хранится в самой кнопке, а не в памяти процесса.
+
+    Повторный `lang:` в адресе игнорируется: он означал бы бесконечную
+    перерисовку, а битая кнопка не имеет права ронять бота.
+    """
+    chosen, _, target = argument.partition(":")
+    if chosen not in config.LANGUAGES:
+        return presentation.menu_screen(language)
+    set_chat_language(chat_id, chosen, pinned=True)
+    if target and not target.startswith("lang"):
+        return screen_for_action(target, chat_id)
+    return presentation.language_switched_screen(chosen)
 
 
 def stats_screen(chat_id: int | str | None = None) -> Screen:
@@ -560,7 +630,11 @@ def _markup(screen: Screen) -> Any | None:
 
 
 async def _send(message: Any, screen: Screen) -> None:
-    """Отправить экран в чат."""
+    """Отправить экран новым сообщением.
+
+    Новое сообщение появляется только в ответ на новый текст абонента и
+    на команду. Нажатие кнопки сообщений не плодит — см. :func:`_edit`.
+    """
     await message.reply_text(
         screen.text,
         parse_mode=screen.parse_mode,
@@ -569,20 +643,60 @@ async def _send(message: Any, screen: Screen) -> None:
     )
 
 
+#: Так Telegram отвечает на попытку переписать сообщение тем же текстом
+#: и той же клавиатурой. Это не ошибка: абонент просто нажал кнопку
+#: экрана, на котором уже стоит.
+NOT_MODIFIED = "message is not modified"
+
+
+def _is_not_modified(error: BaseException) -> bool:
+    """Жалоба Telegram «текст не изменился»?"""
+    return NOT_MODIFIED in str(error).lower()
+
+
+async def _edit(query: Any, screen: Screen) -> str:
+    """Переписать сообщение, в котором нажата кнопка.
+
+    Возвращает «edited», «unchanged» или «failed» — состояние нужно
+    тестам и логу. Новых сообщений функция не отправляет: именно от них
+    чат превращался в простыню, где не найти сам ответ.
+
+    `edit_message_text` с `reply_markup=None` заодно убирает клавиатуру —
+    так карточка сворачивается в одну строку после «Понятно».
+    """
+    try:
+        from telegram.error import TelegramError as _Error
+    except ImportError:                       # pragma: no cover
+        _Error = Exception                    # type: ignore[assignment, misc]
+
+    try:
+        await query.edit_message_text(
+            screen.text,
+            parse_mode=screen.parse_mode,
+            reply_markup=_markup(screen),
+            disable_web_page_preview=True,
+        )
+    except _Error as error:
+        if _is_not_modified(error):
+            logger.debug("экран не изменился, Telegram правку отклонил")
+            return "unchanged"
+        logger.warning("не удалось переписать сообщение: %s", error)
+        return "failed"
+    return "edited"
+
+
 async def _on_start(update: Any, context: Any) -> None:
     """/start — USSD-меню. Экрана выбора языка нет намеренно."""
     chat_id = update.effective_chat.id
     await _send(update.effective_message,
-                presentation.start_screen(chat_language(chat_id),
-                                          pinned=is_language_pinned(chat_id)))
+                presentation.start_screen(chat_language(chat_id)))
 
 
 async def _on_help(update: Any, context: Any) -> None:
     """/help — короткая справка."""
     chat_id = update.effective_chat.id
     await _send(update.effective_message,
-                presentation.help_screen(chat_language(chat_id),
-                                         pinned=is_language_pinned(chat_id)))
+                presentation.help_screen(chat_language(chat_id)))
 
 
 async def _on_stats(update: Any, context: Any) -> None:
@@ -614,12 +728,23 @@ async def _on_text(update: Any, context: Any) -> None:
 
 
 async def _on_button(update: Any, context: Any) -> None:
-    """Нажатие кнопки: похожий вопрос, раздел меню, язык, оператор."""
+    """Нажатие кнопки переписывает то сообщение, в котором эта кнопка.
+
+    Раздел меню превращается в список тем, тема — в карточку ответа,
+    «Меню» — обратно в меню, «Понятно» — в одну строку подтверждения.
+    Новых сообщений не отправляется ни одного: за минуту живого теста
+    три сообщения на касание превращали чат в двадцать сообщений, среди
+    которых не найти ответ.
+
+    `answer_callback_query` вызывается первым и всегда: без него у
+    кнопки до сорока секунд крутятся часики, даже если экран уже
+    перерисован.
+    """
     query = update.callback_query
     await query.answer()
     chat_id = update.effective_chat.id
     screen = screen_for_action(query.data or "", chat_id)
-    await _send(query.message, screen)
+    await _edit(query, screen)
 
 
 def build_application(token: str) -> Any:

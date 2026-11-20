@@ -1,9 +1,14 @@
-"""Тесты интерфейса: USSD-меню, двуязычная карточка, светофор, /stats.
+"""Тесты интерфейса: USSD-меню, карточка ответа, светофор, /stats.
 
 Оформление проверяется без Telegram: `presentation` возвращает текст и
 описание кнопок, а `bot.screen_for_*` решает, какой экран показать. Это
 и есть пункт 3 обязательной части — «ниже порога показать три похожих
 вопроса кнопками».
+
+Отдельная группа тестов охраняет правило «один язык за раз». ТЗ требует
+отвечать на языке вопроса, а не на двух сразу: двуязычный экран вдвое
+длиннее и делает кнопку переключения языка бессмысленной. Исключение
+ровно одно — `/start`, где язык абонента ещё неизвестен.
 """
 from __future__ import annotations
 
@@ -86,15 +91,36 @@ def test_menu_has_five_sections_plus_operator():
     assert len(set(numbers)) == len(numbers)
 
 
-def test_menu_lines_are_bilingual_and_numbered():
-    """Строка меню содержит цифру и оба языка сразу."""
-    text = presentation.plain_text(presentation.menu_screen("ky"))
+def test_menu_lines_are_numbered_and_single_language():
+    """Строка меню: цифра и название раздела на языке абонента.
+
+    Цифра языка не имеет и работает одинаково для обеих аудиторий —
+    поэтому дублировать само название вторым языком не нужно.
+    """
+    kyrgyz = presentation.plain_text(presentation.menu_screen("ky"))
+    russian = presentation.plain_text(presentation.menu_screen("ru"))
 
     for section in presentation.MENU_SECTIONS:
-        assert section.title_ky in text
-        assert section.title_ru in text
-        assert str(section.number) in text
-        assert f"{section.title_ky} · {section.title_ru}" in text
+        assert section.title_ky in kyrgyz
+        assert section.title_ru not in kyrgyz
+        assert section.title_ru in russian
+        assert section.title_ky not in russian
+        assert str(section.number) in kyrgyz
+
+
+def test_start_is_the_only_bilingual_screen():
+    """`/start` двуязычен: абонент ещё ничего не написал.
+
+    Определять язык не по чему, а встречать кыргызоязычного человека
+    русским приветствием только потому, что `ru` стоит по умолчанию, —
+    хуже, чем одна длинная строка. После первой реплики язык известен,
+    и дальше интерфейс одноязычный.
+    """
+    start = presentation.plain_text(presentation.start_screen("ru"))
+
+    assert "Саламатсызбы! · Здравствуйте!" in start
+    for section in presentation.MENU_SECTIONS:
+        assert f"{section.title_ky} · {section.title_ru}" in start
 
 
 def test_start_screen_is_menu_not_language_choice():
@@ -105,6 +131,70 @@ def test_start_screen_is_menu_not_language_choice():
 
     assert len(language_buttons) == 1
     assert any(button.action.startswith("section:") for button in screen.buttons)
+
+
+def test_section_screen_prints_each_topic_once():
+    """Тема в списке раздела печатается один раз, а не с переводом под ней."""
+    section = presentation.section_by_number(2)
+    text = presentation.plain_text(
+        presentation.section_screen(section, all_entries(), "ru"))
+
+    for faq_id in section.faq_ids:
+        entry = entry_by_id(faq_id)
+        assert text.count(entry.question_ru) == 1
+        assert entry.question_ky not in text
+
+
+#: Служебные слова, по которым видно, что в экран затесался второй язык.
+KY_SERVICE_WORDS = ("жазыңыз", "басыңыз", "тандаңыз", "суроо", "кодду")
+RU_SERVICE_WORDS = ("нажмите", "напишите", "выберите", "вопрос",
+                    "скопировать")
+
+
+def _screens(language: str) -> list[Screen]:
+    """Экраны, которые абонент видит чаще всего."""
+    return [
+        presentation.menu_screen(language),
+        presentation.section_screen(presentation.section_by_number(2),
+                                    all_entries(), language),
+        presentation.answer_card(make_reply(1, language=language)),
+        presentation.answer_card(rejected_reply(language)),
+        presentation.acknowledged_screen(language),
+        presentation.another_question_screen(language),
+        presentation.help_screen(language),
+        presentation.operator_screen(entry_by_id(14), language,
+                                     "direct_request"),
+    ]
+
+
+@pytest.mark.parametrize("language, foreign", [
+    ("ru", KY_SERVICE_WORDS),
+    ("ky", RU_SERVICE_WORDS),
+])
+def test_screens_do_not_mix_two_languages(language, foreign):
+    """В экране нет служебных слов второго языка.
+
+    Это и был дефект: подсказки, подписи кнопок и строка состояния
+    печатались на двух языках, экран раздувался вдвое при той же пользе,
+    а кнопка переключения языка ничего видимого не меняла.
+    """
+    for screen in _screens(language):
+        text = presentation.plain_text(screen).lower()
+        for word in foreign:
+            assert word not in text, (word, text)
+
+
+def test_language_status_line_is_gone():
+    """Длинной строки «язык ответов: Русский (определяется сам)» больше нет.
+
+    Она требовалась, пока смена языка ничего не меняла на экране. Теперь
+    меню само написано на выбранном языке.
+    """
+    text = presentation.plain_text(presentation.menu_screen("ru"))
+
+    assert "язык ответов" not in text
+    assert "Жооп тили" not in text
+    assert not hasattr(presentation, "language_status")
 
 
 def test_section_screen_lists_questions_as_buttons():
@@ -169,14 +259,60 @@ def test_card_without_ussd_code_has_no_block():
     assert "<code>" not in screen.text
 
 
-def test_card_shows_both_languages():
-    """Ответ на языке вопроса крупно, второй язык — мелко, курсивом."""
+def test_card_is_written_in_one_language():
+    """ТЗ: «отвечает на том же языке». Второго перевода в карточке нет.
+
+    Блок «Русский: …» под кыргызским ответом удваивал карточку и делал
+    переключатель языка бессмысленным: что ни нажми, на экране всё равно
+    оба языка.
+    """
     entry = entry_by_id(4)
     screen = presentation.answer_card(make_reply(4, language="ky"))
 
     assert entry.answer_ky in screen.text
-    assert f"<i>{presentation.LANGUAGE_NAMES['ru']}: {entry.answer_ru}</i>" \
-        in screen.text
+    assert entry.answer_ru not in screen.text
+    assert f"{presentation.LANGUAGE_NAMES['ru']}:" not in screen.text
+
+
+def test_card_language_button_redraws_the_same_card():
+    """Кнопка языка несёт адрес своего экрана, а не просто код языка.
+
+    Благодаря этому `bot.screen_for_action()` собирает ту же карточку на
+    другом языке, а `bot._on_button()` переписывает ею то же сообщение.
+    """
+    screen = presentation.answer_card(make_reply(4, language="ky"))
+    actions = [button.action for button in screen.buttons
+               if button.action.startswith("lang:")]
+
+    assert actions == ["lang:ru:faq:4"]
+
+
+def test_card_after_ack_collapses_into_one_line():
+    """«Понятно» сворачивает карточку в одну строку без кнопок и меню."""
+    screen = presentation.acknowledged_screen("ru")
+
+    assert "\n" not in screen.text
+    assert screen.rows == ()
+
+
+@pytest.mark.parametrize("screen, limit", [
+    (presentation.answer_card(make_reply(1)), 7),
+    (presentation.answer_card(rejected_reply()), 7),
+    (presentation.menu_screen("ru"), 10),
+    (presentation.acknowledged_screen("ru"), 1),
+    (presentation.another_question_screen("ru"), 2),
+    (presentation.smalltalk_screen("greeting", "ru"), 3),
+])
+def test_screens_stay_short(screen, limit):
+    """Карточка и служебные экраны держатся в границах по числу строк.
+
+    Числа взяты из живого теста: двадцать сообщений за минуту означали,
+    что ответ найти невозможно. Короткий экран — часть ответа, а не
+    украшение.
+    """
+    lines = presentation.plain_text(screen).split("\n")
+
+    assert len(lines) <= limit, "\n".join(lines)
 
 
 def test_card_quotes_answer_from_faq_json():
@@ -289,15 +425,45 @@ def test_language_button_switches_interface():
 
 
 def test_another_question_button_resets_topic():
-    """«Другой вопрос» сбрасывает тему диалога и показывает меню."""
+    """«Другой вопрос» сбрасывает тему диалога и приглашает написать.
+
+    Полного меню здесь нет намеренно: абонент только что сказал, что
+    хочет спросить своими словами. Меню — одной кнопкой.
+    """
     from faq_bot.answer import MEMORY
 
     MEMORY.remember(7, 4, 0.9)
     screen = bot.screen_for_action("another", 7)
+    text = presentation.plain_text(screen)
 
     assert MEMORY.recent_topic(7) is None
-    assert "Новый вопрос" in presentation.plain_text(screen)
-    assert any(action.startswith("section:") for action in screen.actions())
+    assert "Новый вопрос" in text
+    assert "menu" in screen.actions()
+    assert not [action for action in screen.actions()
+                if action.startswith("section:")]
+
+
+@pytest.mark.parametrize("action", ["ack", "another", "faq:1", "section:2"])
+def test_menu_is_not_repeated_after_every_button(action):
+    """Полное меню приходит по /start, по кнопке «Меню» и при отказе.
+
+    Раньше оно печаталось ещё и после приветствия, после «Понятно» и
+    после каждого ответа — абонент видел шесть пунктов меню чаще, чем
+    сам ответ.
+    """
+    text = presentation.plain_text(bot.screen_for_action(action, 7))
+    listed = [section for section in presentation.MENU_SECTIONS
+              if section.name("ru") in text]
+
+    assert len(listed) < len(presentation.MENU_SECTIONS)
+
+
+def test_menu_button_still_shows_the_whole_menu():
+    """А по кнопке «Меню» — показывает: это один из трёх разрешённых мест."""
+    text = presentation.plain_text(bot.screen_for_action("menu", 7))
+
+    for section in presentation.MENU_SECTIONS:
+        assert section.name("ru") in text
 
 
 def test_unknown_action_falls_back_to_menu():
