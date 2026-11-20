@@ -5,7 +5,8 @@
     python main.py ask "А сколько стоит?" --chat 7  тот же чат, с контекстом
     python main.py ask "роуминг" --card             как это выглядит в боте
     python main.py eval --split tune --errors       точность по набору
-    python main.py bot                              Telegram
+    python main.py bot                              Telegram + CRM операторов
+    python main.py crm                              только CRM, демо-клиент
 
 Команды `ask` и `eval` работают без токена и без `python-telegram-bot`:
 функция `answer()` ядро проекта, а бот — надстройка над ней.
@@ -63,7 +64,14 @@ def command_bot(args: argparse.Namespace) -> int:
     """Запустить Telegram-бота. Без токена — понятное сообщение."""
     from faq_bot.bot import run
 
-    return run(args.token)
+    return run(args.token, crm=not args.no_crm)
+
+
+def command_crm(args: argparse.Namespace) -> int:
+    """Веб-интерфейс операторов без Telegram: демо-клиент вместо абонента."""
+    from faq_bot.crm.server import serve
+
+    return serve(args.host, args.port)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -93,7 +101,14 @@ def build_parser() -> argparse.ArgumentParser:
     bot = commands.add_parser("bot", help="запустить Telegram-бота")
     bot.add_argument("--token", default=None,
                      help="токен; по умолчанию из TELEGRAM_BOT_TOKEN")
+    bot.add_argument("--no-crm", action="store_true",
+                     help="не поднимать веб-интерфейс операторов")
     bot.set_defaults(handler=command_bot)
+
+    crm = commands.add_parser("crm", help="веб-интерфейс операторов без Telegram")
+    crm.add_argument("--host", default=None, help="по умолчанию 127.0.0.1")
+    crm.add_argument("--port", type=int, default=None, help="по умолчанию 8765")
+    crm.set_defaults(handler=command_crm)
     return parser
 
 
