@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>INAI Mobile — макет интерфейса</title>
+<style>
+  :root {
+    --bg: #0e1621;
+    --panel: #17212b;
+    --bubble-in: #182533;
+    --bubble-out: #2b5278;
+    --text: #e9edf1;
+    --muted: #7d8e9e;
+    --accent: #5aa7e8;
+    --btn: #1f2c3a;
+    --btn-border: #2e4155;
+    --green: #4caf50;
+    --yellow: #e6b422;
+    --red: #e05c54;
+    --code: #0b1016;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #0a0f16; color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
+    padding: 24px 16px 60px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .lead { color: var(--muted); font-size: 14px; margin: 0 0 24px; max-width: 70ch; line-height: 1.5; }
+  .grid { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+  .screen { width: 330px; flex: 0 0 auto; }
+  .caption { font-size: 13px; color: var(--muted); margin: 0 0 8px; line-height: 1.4; }
+  .caption b { color: var(--text); display: block; font-size: 14px; margin-bottom: 2px; }
+  .phone {
+    background: var(--bg); border: 1px solid #22303d; border-radius: 14px;
+    overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.4);
+  }
+  .bar {
+    background: var(--panel); padding: 9px 12px; display: flex; gap: 9px; align-items: center;
+    border-bottom: 1px solid #22303d;
+  }
+  .ava {
+    width: 30px; height: 30px; border-radius: 50%;
+    background: linear-gradient(135deg, #2d7dd2, #19b5a7);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; letter-spacing: .4px;
+  }
+  .who { font-size: 13px; font-weight: 600; line-height: 1.25; }
+  .who span { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
+  .chat { padding: 12px; display: flex; flex-direction: column; gap: 9px; }
+  .msg { max-width: 86%; padding: 8px 11px; border-radius: 12px; font-size: 13.5px; line-height: 1.45; white-space: pre-wrap; }
+  .in { background: var(--bubble-in); border-bottom-left-radius: 4px; align-self: flex-start; }
+  .out { background: var(--bubble-out); border-bottom-right-radius: 4px; align-self: flex-end; }
+  .ky { color: var(--muted); font-size: 12px; }
+  .sep { height: 1px; background: #26384a; margin: 7px 0; }
+  .code {
+    background: var(--code); border: 1px solid #263445; border-radius: 7px;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 17px; letter-spacing: 1px; text-align: center;
+    padding: 9px; margin: 8px 0 4px; color: #8ddc8d;
+  }
+  .hint { font-size: 11px; color: var(--muted); text-align: center; }
+  .kb { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+  .key {
+    flex: 1 1 auto; text-align: center; background: var(--btn);
+    border: 1px solid var(--btn-border); border-radius: 7px;
+    padding: 7px 9px; font-size: 12px; color: #cfe2f3;
+  }
+  .key.full { flex-basis: 100%; }
+  .menu { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; line-height: 1.75; }
+  .menu .num { color: var(--accent); font-weight: 700; }
+  .light { font-weight: 600; }
+  .g { color: var(--green); } .y { color: var(--yellow); } .r { color: var(--red); }
+  .note {
+    margin-top: 10px; font-size: 12px; color: var(--muted); line-height: 1.5;
+    border-left: 2px solid #2b3f52; padding-left: 10px;
+  }
+  .note b { color: #b9ccdd; }
+  h2 { font-size: 15px; margin: 34px 0 14px; color: #b9ccdd;
+       border-bottom: 1px solid #22303d; padding-bottom: 7px; }
+</style>
+</head>
+<body>
+
+<h1>INAI Mobile — макет интерфейса бота</h1>
+<p class="lead">
+  Три приёма вместе: USSD-меню как вход, двуязычная карточка с копируемым кодом,
+  светофор уверенности вместо скрытого порога. Это рисунок, а не рабочий бот —
+  нужен, чтобы оценить подачу до того, как она попадёт в код.
+</p>
+
+<h2>Вход и обычный вопрос</h2>
+<div class="grid">
+
+  <div class="screen">
+    <p class="caption"><b>1. Команда /start</b>
+      Меню цифрами. Цифра не имеет языка — её нажмёт и тот, кто читает по-кыргызски,
+      и тот, кто по-русски.</p>
+    <div class="phone">
+      <div class="bar"><div class="ava">INAI</div>
+        <div class="who">INAI Mobile<span>Колдоо · Поддержка</span></div></div>
+      <div class="chat">
+        <div class="msg out">/start</div>
+        <div class="msg in"><b>📱 INAI Mobile</b>
+<div class="menu">
+<span class="num">1</span>  Баланс, пакеттер · Баланс, пакеты
+<span class="num">2</span>  Интернет · Интернет
+<span class="num">3</span>  Роуминг · Роуминг
+<span class="num">4</span>  SIM, номер · SIM, номер
+<span class="num">5</span>  Акча · Деньги
+<span class="num">0</span>  Оператор · Оператор
+</div>
+<div class="sep"></div>
+<span class="ky">Суроо жазыңыз же цифра басыңыз
+Напишите вопрос или нажмите цифру</span></div>
+        <div class="kb">
+          <div class="key">1</div><div class="key">2</div><div class="key">3</div>
+          <div class="key">4</div><div class="key">5</div><div class="key">0</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="screen">
+    <p class="caption"><b>2. 🟢 Уверенный ответ</b>
+      Код вынесен отдельным блоком — копируется касанием, а не переписывается с экрана.
+      Вторым языком тот же ответ мелко.</p>
+    <div class="phone">
+      <div class="bar"><div class="ava">INAI</div>
+        <div class="who">INAI Mobile<span>Колдоо · Поддержка</span></div></div>
+      <div class="chat">
+        <div class="msg out">Скока денег на счету?</div>
+        <div class="msg in"><span class="light g">🟢 Проверка баланса</span>
+
+Наберите *100#. Проверка бесплатная.
+<div class="code">*100#</div>
+<div class="hint">нажмите, чтобы скопировать</div>
+<div class="sep"></div>
+<span class="ky">🇰🇬 *100# териңиз. Текшерүү акысыз.</span></div>
+        <div class="kb">
+          <div class="key">Понятно ✓</div>
+          <div class="key">Другой вопрос</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="screen">
+    <p class="caption"><b>3. Кыргызская латиница</b>
+      «Balansymdy kantip korom» — ни одной кириллической буквы, но язык определён
+      как кыргызский, и ответ пришёл на нём.</p>
+    <div class="phone">
+      <div class="bar"><div class="ava">INAI</div>
+        <div class="who">INAI Mobile<span>Колдоо · Поддержка</span></div></div>
+      <div class="chat">
+        <div class="msg out">Balansymdy kantip korom</div>
+        <div class="msg in"><span class="light g">🟢 Балансты текшерүү</span>
+
+*100# териңиз. Текшерүү акысыз.
+<div class="code">*100#</div>
+<div class="hint">көчүрүү үчүн басыңыз</div>
+<div class="sep"></div>
+<span class="ky">🇷🇺 Наберите *100#. Проверка бесплатная.</span></div>
+        <div class="kb">
+          <div class="key">Түшүнүктүү ✓</div>
+          <div class="key">Башка суроо</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<h2>Когда бот не уверен</h2>
+<div class="grid">
+
+  <div class="screen">
+    <p class="caption"><b>4. 🟡 Скорее всего</b>
+      Ответ выдаётся, но рядом честно предлагаются соседние темы.</p>
+    <div class="phone">
+      <div class="bar"><div class="ava">INAI</div>
+        <div class="who">INAI Mobile<span>Колдоо · Поддержка</span></div></div>
+      <div class="chat">
+        <div class="msg out">деньги закончились</div>
+        <div class="msg in"><span class="light y">🟡 Возможно, вы про пополнение счёта</span>
+
+Пополните счёт через приложение, терминал или *102#.
+<div class="code">*102#</div>
+<div class="sep"></div>
+<span class="ky">Эгер башканы сурасаңыз — төмөндөн тандаңыз
+Если вы про другое — выберите ниже</span></div>
+        <div class="kb">
+          <div class="key full">Проверить баланс · Балансты текшерүү</div>
+          <div class="key full">Перевести деньги · Акча которуу</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="screen">
+    <p class="caption"><b>5. 🔴 Не уверен</b>
+      Ответа нет вовсе — только три похожих вопроса кнопками.
+      Это пункт 3 обязательной части.</p>
+    <div class="phone">
+      <div class="bar"><div class="ava">INAI</div>
+        <div class="who">INAI Mobile<span>Колдоо · Поддержка</span></div></div>
+      <div class="chat">
+        <div class="msg out">а там это, с симкой чёт</div>
+        <div class="msg in"><span class="light r">🔴 Не понял вопрос</span>
+
+<span class="ky">Тактаңыз, сураныч · Уточните, пожалуйста</span></div>
+        <div class="kb">
+          <div class="key full">Восстановить SIM · SIM калыбына келтирүү</div>
+          <div class="key full">Заблокировать SIM · SIM бөгөттөө</div>
+          <div class="key full">Узнать свой номер · Өз номерим</div>
+          <div class="key full">↳ Оператор · Оператор</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="screen">
+    <p class="caption"><b>6. Вопрос вне базы</b>
+      Про погоду бот честно отказывается и не выдумывает — этого прямо
+      требуют уточнения организаторов.</p>
+    <div class="phone">
+      <div class="bar"><div class="ava">INAI</div>
+        <div class="who">INAI Mobile<span>Колдоо · Поддержка</span></div></div>
+      <div class="chat">
+        <div class="msg out">Бүгүн аба ырайы кандай?</div>
+        <div class="msg in"><span class="light r">🔴 Бул суроо биздин базада жок</span>
+
+<span class="ky">Мен уюлдук байланыш боюнча гана жардам берем:
+баланс, интернет, роуминг, тариф, SIM.
+
+Я помогаю только по мобильной связи.</span></div>
+        <div class="kb">
+          <div class="key">📋 Меню</div>
+          <div class="key">↳ Оператор</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<h2>Контекст диалога и статистика</h2>
+<div class="grid">
+
+  <div class="screen">
+    <p class="caption"><b>7. Уточняющий вопрос</b>
+      «А сколько стоит?» само по себе не значит ничего. Бот держит тему
+      предыдущей реплики — пункт 4 обязательной части.</p>
+    <div class="phone">
+      <div class="bar"><div class="ava">INAI</div>
+        <div class="who">INAI Mobile<span>Колдоо · Поддержка</span></div></div>
+      <div class="chat">
+        <div class="msg out">Как подключить роуминг?</div>
+        <div class="msg in"><span class="light g">🟢 Роуминг</span>
+
+Роуминг включается в приложении или командой *111#.
+<div class="code">*111#</div></div>
+        <div class="msg out">А сколько стоит?</div>
+        <div class="msg in"><span class="light g">🟢 Роуминг · продолжение</span>
+
+Стоимость зависит от страны и пакета. Актуальные тарифы — в приложении.
+<div class="sep"></div>
+<span class="ky">↳ тема сохранена: роуминг</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="screen">
+    <p class="caption"><b>8. Команда /stats</b>
+      Агрегат, без чужих персональных данных — так требуют уточнения.
+      Пункт 5 обязательной части.</p>
+    <div class="phone">
+      <div class="bar"><div class="ava">INAI</div>
+        <div class="who">INAI Mobile<span>Колдоо · Поддержка</span></div></div>
+      <div class="chat">
+        <div class="msg out">/stats</div>
+        <div class="msg in"><b>📊 Неотвеченные вопросы</b>
+<div class="menu">
+Всего обращений      <b>128</b>
+Найден ответ         <b>113</b>  88%
+Не найден            <b>15</b>   12%
+</div>
+<div class="sep"></div>
+<b>Чаще всего не находим</b>
+<div class="menu">
+· вне базы связи      9
+· слишком короткие    4
+· опечатки            2
+</div>
+<div class="sep"></div>
+<span class="ky">Примеры: «аба ырайы», «кредит», «такси»</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="screen">
+    <p class="caption"><b>9. Смешанная речь</b>
+      Русский термин внутри кыргызской фразы язык не переключает —
+      решает грамматическая основа.</p>
+    <div class="phone">
+      <div class="bar"><div class="ava">INAI</div>
+        <div class="who">INAI Mobile<span>Колдоо · Поддержка</span></div></div>
+      <div class="chat">
+        <div class="msg out">Роуминг канча турат?</div>
+        <div class="msg in"><span class="light g">🟢 Роуминг</span>
+
+Роуминг кызматы колдонмодон же *111# аркылуу küyötülöt. Баасы өлкөгө жараша.
+<div class="code">*111#</div>
+<div class="sep"></div>
+<span class="ky">🇷🇺 Роуминг включается в приложении или командой *111#.</span></div>
+        <div class="note">Слово «роуминг» русское, но основа фразы
+          кыргызская — ответ на кыргызском.</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<h2>Почему так</h2>
+<div class="grid">
+  <div style="max-width: 72ch; font-size: 13.5px; line-height: 1.65; color: #c3d2df;">
+    <p><b>Цифры вместо языка.</b> Любой абонент в Кыргызстане уже знает
+      <code>*100#</code>. Меню цифрами не требует читать ни по-русски, ни
+      по-кыргызски — это и есть доступность, а не перевод интерфейса.</p>
+    <p><b>Код отдельным блоком.</b> Главное действие пользователя — набрать
+      USSD-команду. Если она растворена в предложении, её переписывают с
+      экрана и ошибаются. Вынесенный блок копируется касанием.</p>
+    <p><b>Оба языка всегда.</b> Люди здесь переключаются внутри одной фразы.
+      Второй язык мелким шрифтом не мешает, но снимает риск, что мы ошиблись
+      с определением.</p>
+    <p><b>Светофор вместо скрытого порога.</b> <span class="g">🟢</span> отвечаем,
+      <span class="y">🟡</span> отвечаем и предлагаем альтернативы,
+      <span class="r">🔴</span> не отвечаем вовсе. Техническое число
+      <code>confidence</code> превращается в видимое поведение — и жюри
+      сразу понимает, что порог осмыслен.</p>
+    <p><b>Никакого «выберите язык» на старте.</b> Это ровно тот барьер,
+      который мы снимаем. Язык определяется сам, переключатель спрятан
+      в одну кнопку на случай ошибки.</p>
+  </div>
+</div>
+
+</body>
+</html>
