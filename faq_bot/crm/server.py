@@ -39,6 +39,7 @@ import threading
 import time
 from http import HTTPStatus
 from http.cookies import SimpleCookie
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,10 @@ from faq_bot.crm.hub import Hub
 from faq_bot.crm.store import Store
 
 logger = logging.getLogger(__name__)
+
+class PortBusy(OSError):
+    """Порт CRM занят. Отдельный тип, чтобы вызывающий отличил это от сети."""
+
 
 STATIC_DIR = Path(__file__).with_name("static")
 STATIC_TYPES = {
@@ -157,7 +162,42 @@ def _static(name: str) -> tuple[bytes, bytes, str] | None:
 
 class CrmServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+
+    # Намеренно False, и это не придирка к стилю.
+    #
+    # На Windows SO_REUSEADDR разрешает ВТОРОМУ процессу сесть на уже
+    # занятый порт. Оба привязываются успешно, соединения достаются
+    # одному из них, и никто ни о чём не предупреждает.
+    #
+    # Мы на это наступили во время живого теста. Браузер разговаривал с
+    # одним экземпляром CRM, а Telegram вёл другой; база SQLite общая,
+    # поэтому очередь и переписка выглядели правильно, но ответ
+    # оператора не доходил: «бот не подключён к Telegram». Причина не
+    # видна ниоткуда — ни в логе, ни в интерфейсе.
+    #
+    # С False второй экземпляр честно падает на привязке, а
+    # :func:`build_server` превращает это в понятное сообщение.
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        """Занять порт так, чтобы его нельзя было отнять.
+
+        На Windows мало выключить SO_REUSEADDR у себя: флаг разрешает
+        перехват тому, кто УЖЕ слушает. Если первый экземпляр сел с
+        ним, второй всё равно привяжется. Поэтому первый сразу просит
+        исключительное владение — `SO_EXCLUSIVEADDRUSE`. Тогда любой
+        следующий получает отказ, а не половину соединений.
+
+        На других системах константы нет, и достаточно `allow_reuse_address
+        = False` выше.
+        """
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive is not None:
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            except OSError:                         # pragma: no cover
+                logger.debug("SO_EXCLUSIVEADDRUSE недоступен")
+        super().server_bind()
 
     def __init__(self, address: tuple[str, int], hub: Hub) -> None:
         super().__init__(address, Handler)
@@ -497,9 +537,19 @@ def build_server(host: str | None = None, port: int | None = None,
         retention = float(os.environ.get("CRM_RETENTION_DAYS") or 30)
         db_path = os.environ.get("CRM_DB") or None
         hub = Hub(Store(db_path), retention_days=retention)
-    server = CrmServer((host, port), hub)
+    try:
+        server = CrmServer((host, port), hub)
+    except OSError as error:
+        raise PortBusy(
+            f"Порт {port} занят — скорее всего, CRM уже запущена. "
+            "Посмотреть, кто работает: python tools/run_bot.py --status. "
+            "Остановить лишнее: python tools/run_bot.py --stop. "
+            "Либо занять другой порт: CRM_PORT=8766"
+        ) from error
     shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
-    print(f"CRM операторов: http://{shown}:{port}")
+    # Порт берём у сокета, а не из аргумента: при port=0 система выдаёт
+    # свободный, и в лог должен попасть он, а не ноль.
+    print(f"CRM операторов: http://{shown}:{server.server_address[1]}")
     if server.accounts.ensure_admin():
         print(f"  создан администратор: логин {acc.DEFAULT_ADMIN_LOGIN}."
               " Смените пароль после первого входа (раздел «Операторы»).")

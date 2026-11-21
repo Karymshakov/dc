@@ -416,3 +416,47 @@ def test_poll_просыпается_на_изменении(hub):
     thread.join(2)
     assert not thread.is_alive()
     assert "chat:p" in result["value"][1]
+
+
+# --------------------------------------------------------------------------
+# Один экземпляр на порт
+# --------------------------------------------------------------------------
+#
+# Дефект пойман живым тестом, и он был тихим. Браузер разговаривал с
+# одним экземпляром CRM, а Telegram вёл другой. База SQLite общая,
+# поэтому очередь и переписка выглядели правильно — но ответ оператора
+# не доходил: «бот не подключён к Telegram». Ни лог, ни интерфейс
+# причину не показывали.
+#
+# На Windows мало выключить SO_REUSEADDR у себя: флаг разрешает перехват
+# тому, кто уже слушает. Поэтому первый экземпляр просит исключительное
+# владение портом.
+
+def test_a_second_crm_refuses_to_start_on_a_busy_port():
+    from faq_bot.crm import server as crm_server
+
+    first = crm_server.build_server(host="127.0.0.1", port=0)
+    try:
+        port = first.server_address[1]
+
+        with pytest.raises(crm_server.PortBusy) as refused:
+            crm_server.build_server(host="127.0.0.1", port=port)
+
+        assert str(port) in str(refused.value)
+        assert "занят" in str(refused.value)
+    finally:
+        first.server_close()
+
+
+def test_the_printed_address_is_the_real_port(capsys):
+    """При port=0 в лог должен попасть выданный порт, а не ноль."""
+    from faq_bot.crm import server as crm_server
+
+    server = crm_server.build_server(host="127.0.0.1", port=0)
+    try:
+        printed = capsys.readouterr().out
+
+        assert str(server.server_address[1]) in printed
+        assert ":0" not in printed
+    finally:
+        server.server_close()

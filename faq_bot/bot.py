@@ -1886,9 +1886,14 @@ def run(token: str | None = None, crm: bool = True) -> int:
         return 2
 
     async def _post_init(application: Any) -> None:
-        if CRM is not None:
-            CRM.set_sender(_telegram_sender(application,
-                                            asyncio.get_running_loop()))
+        if CRM is None:
+            return
+        CRM.set_sender(_telegram_sender(application,
+                                        asyncio.get_running_loop()))
+        # Строка в логе не для красоты: без неё молчаливо неподключённая
+        # CRM выглядит работающей ровно до первого ответа оператора.
+        logger.info("CRM подключена к Telegram: ответы операторов уходят "
+                    "абонентам")
 
     try:
         application = build_application(token, post_init=_post_init)
@@ -1899,7 +1904,16 @@ def run(token: str | None = None, crm: bool = True) -> int:
     if crm:
         from .crm import server as crm_server
 
-        attach_crm(crm_server.start_in_background().hub)
+        try:
+            attach_crm(crm_server.start_in_background().hub)
+        except crm_server.PortBusy as busy:
+            # Молча работать дальше нельзя: вторая CRM на том же порту
+            # примет браузер, но Telegram вести не будет, и ответы
+            # оператора просто не дойдут. Лучше не запуститься.
+            print("")
+            print(f"CRM не поднялась. {busy}")
+            print("  Либо запустите бота без неё: python main.py bot --no-crm")
+            return 2
 
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
