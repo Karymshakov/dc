@@ -506,3 +506,47 @@ def test_one_thought_in_three_messages_counts_as_one_question():
                         chat_id=4242, revision=True)
 
     assert STATS.snapshot().total - before == 1
+
+
+# --------------------------------------------------------------------------
+# Приёмка по четвёртому порогу ТЗ
+# --------------------------------------------------------------------------
+
+def test_our_dialogs_hold_the_jury_threshold():
+    """Диалогов проходит не меньше 3 из 5.
+
+    Порог жюри, а не достигнутое значение — по той же причине, что и у
+    независимого набора вопросов: тест «не хуже, чем сейчас» превратил
+    бы набор в цель подгонки.
+
+    Проверка появилась поздно и закрыла единственный критерий зачёта,
+    который не мерился вовсе: в задании дан один диалог, и тот жил
+    только в юнит-тесте.
+    """
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from tools.evaluate import JURY_DIALOGS, evaluate_dialogs, load_dialogs
+
+    outcomes = evaluate_dialogs(load_dialogs(config.DIALOGS_OWN_PATH))
+    passed = sum(1 for item in outcomes if item.passed)
+
+    assert len(outcomes) >= 5, "диалогов меньше, чем прогонит жюри"
+    assert passed / len(outcomes) >= JURY_DIALOGS, (
+        f"{passed}/{len(outcomes)}: "
+        + "; ".join(f for item in outcomes for f in item.failures))
+
+
+def test_the_task_example_is_inside_our_set():
+    """Пример из задания обязан быть в наборе: его нельзя потерять молча."""
+    import json
+
+    ours = json.loads(config.DIALOGS_OWN_PATH.read_text(encoding="utf-8"))
+    given = json.loads(config.DIALOGS_PATH.read_text(encoding="utf-8"))
+
+    texts = {turn["text"] for dialog in ours for turn in dialog["turns"]}
+    for turn in given[0]["turns"]:
+        assert turn["text"] in texts

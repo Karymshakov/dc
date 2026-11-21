@@ -8,6 +8,7 @@
     python tools/evaluate.py --split holdout      ФИНАЛЬНАЯ приёмка, один раз
     python tools/evaluate.py --file my.csv        по своему набору
     python tools/evaluate.py --errors             показать ошибки
+    python tools/evaluate.py --dialogs            диалоги с контекстом
 
 Дисциплина измерений. В tune 25 вопросов, поэтому один вопрос — это
 4 процентных пункта. Прирост меньше двух пунктов не является улучшением,
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from faq_bot import config  # noqa: E402
-from faq_bot.answer import answer  # noqa: E402
+from faq_bot.answer import MEMORY, answer, respond  # noqa: E402
 
 
 @dataclass
@@ -165,13 +167,107 @@ def print_report(report: Report, name: str, show_errors: bool) -> None:
                   f" кандидаты {item.candidates})")
 
 
+# ---------------------------------------------------------------------------
+# Диалоги с контекстом: четвёртый порог зачёта
+# ---------------------------------------------------------------------------
+#
+# ТЗ требует «3 из 5 диалогов». Это отдельный критерий, и до появления
+# этого кода он был единственным, который мы не мерили вовсе: в
+# репозитории лежал один пример из задания, и тот проверялся юнит-тестом.
+# Три цифры с запасом и надежда на четвёртую — это не приёмка.
+#
+# Диалог засчитывается ЦЕЛИКОМ: ошибка в любом ходе валит весь диалог.
+# Так считает и жюри — «диалог пройден» не делится на части.
+
+#: Порог ТЗ: сколько диалогов из пяти обязано пройти.
+JURY_DIALOGS = 3 / 5
+
+
+@dataclass
+class DialogOutcome:
+    """Чем кончился один диалог."""
+
+    id: str
+    note: str
+    passed: bool
+    failures: list[str] = field(default_factory=list)
+
+
+def load_dialogs(path: Path) -> list[dict]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def run_dialog(dialog: dict, index: int) -> DialogOutcome:
+    """Прогнать диалог ход за ходом в одном chat_id.
+
+    Память диалогов общая на процесс, поэтому каждый диалог получает свой
+    `chat_id`: иначе предыдущий разговор подсказывал бы следующему, и
+    замер был бы завышен.
+    """
+    chat_id = f"eval-dialog-{index}"
+    failures: list[str] = []
+    for number, turn in enumerate(dialog.get("turns", ()), start=1):
+        reply = respond(turn["text"], chat_id=chat_id)
+        expected = turn.get("faq_id")
+        if reply.faq_id != expected:
+            failures.append(
+                f"ход {number} «{turn['text']}»: тема {reply.faq_id} "
+                f"вместо {expected} (уверенность {reply.confidence:.2f})")
+        if turn.get("lang") and reply.lang != turn["lang"]:
+            failures.append(
+                f"ход {number} «{turn['text']}»: язык {reply.lang} "
+                f"вместо {turn['lang']}")
+    return DialogOutcome(id=dialog.get("id", "?"), note=dialog.get("note", ""),
+                         passed=not failures, failures=failures)
+
+
+def evaluate_dialogs(dialogs: list[dict]) -> list[DialogOutcome]:
+    MEMORY.clear()
+    try:
+        return [run_dialog(dialog, index)
+                for index, dialog in enumerate(dialogs)]
+    finally:
+        MEMORY.clear()
+
+
+def print_dialogs(outcomes: list[DialogOutcome], show_errors: bool) -> None:
+    total = len(outcomes)
+    passed = sum(1 for item in outcomes if item.passed)
+    share = passed / total if total else 0.0
+    verdict = "OK" if share >= JURY_DIALOGS else "НИЖЕ"
+
+    print("")
+    print(f"Диалоги с контекстом: {passed}/{total} = {share:.1%}"
+          f"   порог {JURY_DIALOGS:.0%}  {verdict}")
+    if total:
+        print(f"  один диалог весит {100 / total:.1f} процентных пункта")
+    print("")
+    for item in outcomes:
+        mark = "OK  " if item.passed else "СБОЙ"
+        print(f"  [{mark}] {item.id}  {item.note}")
+        if show_errors:
+            for failure in item.failures:
+                print(f"           {failure}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Точность поиска ответа в FAQ")
     parser.add_argument("--split", choices=("tune", "holdout", "dev"), default="tune",
                         help="какой набор мерить (holdout — только финальная приёмка)")
     parser.add_argument("--file", default=None, help="свой CSV вместо набора")
     parser.add_argument("--errors", action="store_true", help="показать ошибки")
+    parser.add_argument("--dialogs", action="store_true",
+                        help="мерить диалоги с контекстом, а не одиночные вопросы")
     args = parser.parse_args(argv)
+
+    if args.dialogs:
+        path = Path(args.file) if args.file else config.DIALOGS_OWN_PATH
+        if not path.exists():
+            print(f"Не найден {path}")
+            return 1
+        outcomes = evaluate_dialogs(load_dialogs(path))
+        print_dialogs(outcomes, args.errors)
+        return 0
 
     if args.file:
         path, name = Path(args.file), args.file

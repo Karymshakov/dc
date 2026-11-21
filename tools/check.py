@@ -21,6 +21,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # Пороги зачёта из ТЗ.
 JURY_TOP1, JURY_TOP3, JURY_LANG = 0.75, 0.90, 0.90
+#: Четвёртый порог ТЗ: диалогов с контекстом должно пройти 3 из 5.
+JURY_DIALOGS = 3 / 5
 
 
 @dataclass
@@ -163,6 +165,38 @@ def check_accuracy() -> list[Step]:
     return steps
 
 
+def check_dialogs() -> list[Step]:
+    """Четвёртый порог ТЗ: диалоги с контекстом, 3 из 5.
+
+    До появления этой проверки он был единственным критерием зачёта,
+    который мы не мерили вовсе: в задании дан один диалог, и тот
+    проверялся юнит-тестом. Три цифры с запасом и надежда на четвёртую
+    приёмкой не являются.
+    """
+    code = (
+        "import sys; sys.path.insert(0, '.');"
+        "sys.argv = ['evaluate', '--dialogs'];"
+        "import runpy; runpy.run_path('tools/evaluate.py', run_name='__main__')"
+    )
+    ok, output = run([sys.executable, "-I", "-c", code])
+    if not ok:
+        return [Step("прогон диалогов", False, output.strip()[-200:])]
+
+    line = next((row for row in output.splitlines()
+                 if "Диалоги с контекстом" in row), "")
+    share = 0.0
+    for token in line.split():
+        if token.endswith("%"):
+            try:
+                share = float(token.rstrip("%")) / 100
+            except ValueError:
+                pass
+            break
+    counted = line.split(":")[-1].split("=")[0].strip() if ":" in line else "?"
+    return [Step(f"диалоги с контекстом не ниже {JURY_DIALOGS:.0%}",
+                 share >= JURY_DIALOGS, f"{share:.1%} ({counted})")]
+
+
 def check_tests() -> list[Step]:
     ok, output = run([sys.executable, "-m", "pytest", "-q"])
     summary = next((row for row in reversed(output.splitlines()) if "passed" in row
@@ -206,6 +240,7 @@ def main() -> int:
     groups = (
         ("Контракт жюри", check_contract),
         ("Точность", check_accuracy),
+        ("Диалоги", check_dialogs),
         ("Тесты", check_tests),
         ("Сторож фактов", check_consistency),
         ("Секреты", check_no_secrets),

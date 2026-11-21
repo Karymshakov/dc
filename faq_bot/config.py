@@ -15,6 +15,10 @@ DEV_PATH = DATA_DIR / "questions_dev.csv"
 TUNE_PATH = DATA_DIR / "tune.csv"
 HOLDOUT_PATH = DATA_DIR / "holdout.csv"
 DIALOGS_PATH = DATA_DIR / "dialogs_example.json"
+# Наш набор диалогов: пример из задания плюс сочинённые нами.
+# ТЗ требует 3 из 5, и это единственный порог, который до его
+# появления не мерился вовсе — в задании дан ровно один диалог.
+DIALOGS_OWN_PATH = DATA_DIR / "dialogs.json"
 
 # --- Задано ТЗ, не трогать -------------------------------------------------
 
