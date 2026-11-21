@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="ru" data-mode="signal">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Планирование покрытия · Бишкек</title>
+  <style>
+@@LEAFLET_CSS@@
+@@APP_CSS@@
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <h1>Покрытие <span>Бишкек</span></h1>
+    <p class="dataset-note" id="dataset-note">Учебные замеры</p>
+  </header>
+
+  <main class="workspace">
+    <div class="workspace-controls">
+      <div class="model-tabs" role="group" aria-label="Режим карты">
+        <button type="button" data-mode="signal" aria-pressed="true">Сигнал</button>
+        <button type="button" data-mode="compare" aria-pressed="false">Выбор пары</button>
+      </div>
+      <div class="map-options">
+        <details class="control-menu" id="scenario-menu">
+          <summary>Дополнительно</summary>
+          <div class="control-menu-items">
+            <label class="period-setting">Период
+              <select id="measurement-period">
+                <option value="all">Все замеры</option>
+                <option value="day">День · 06:00–18:00</option>
+                <option value="night">Ночь · 18:00–06:00</option>
+              </select>
+            </label>
+            <p class="menu-heading">Сценарии</p>
+            <button type="button" data-mode="stress" aria-pressed="false">Отказ станции</button>
+            <button type="button" data-mode="custom" aria-pressed="false">Своя пара</button>
+            <button type="button" data-mode="buildings" aria-pressed="false">Застройка</button>
+            <p class="menu-heading">Слои карты</p>
+            <label class="layer-toggle" id="comparison-radii-control" hidden><input id="show-comparison-radii" type="checkbox"> Радиусы 1 км</label>
+            <label class="layer-toggle"><input id="show-candidates" type="checkbox"> Все площадки</label>
+            <label class="layer-toggle"><input id="show-heat" type="checkbox"> Тепловой слой</label>
+            <button id="toggle-2gis" class="reset-map basemap-toggle" type="button" aria-pressed="false">Подложка 2ГИС</button>
+            <details class="data-details">
+              <summary>Сводка данных</summary>
+              <dl class="summary-grid">
+                <div><dt>Валидные замеры</dt><dd id="measurement-count">—</dd></div>
+                <div><dt>Клетки с ≥ 5 замерами</dt><dd id="cell-count">—</dd></div>
+                <div><dt>Отброшено строк</dt><dd id="dropped-count">—</dd></div>
+              </dl>
+            </details>
+          </div>
+        </details>
+        <button id="reset-map" class="reset-map" type="button" aria-label="К району" title="Показать весь район">
+          <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M7 3H3v4m10-4h4v4M3 13v4h4m10-4v4h-4m-5-7h4m-2-2v4"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <dialog id="gis-key-dialog" class="basemap-dialog" aria-labelledby="gis-key-title">
+      <form method="dialog" autocomplete="off">
+        <h2 id="gis-key-title">Подложка 2ГИС</h2>
+        <label for="gis-key">Ключ Raster Tiles API</label>
+        <input id="gis-key" type="password" required autofocus>
+        <p>Ключ используется до закрытия или обновления страницы.</p>
+        <div>
+          <button class="reset-map" value="cancel" formnovalidate>Отмена</button>
+          <button class="primary-action" value="connect">Подключить</button>
+        </div>
+      </form>
+    </dialog>
+
+    <section class="custom-pair" id="custom-pair" aria-labelledby="custom-heading" hidden>
+      <div class="custom-header">
+        <h2 id="custom-heading">Своя пара</h2>
+        <label class="layer-toggle"><input id="compare-custom-baseline" type="checkbox"> Сравнить с базой</label>
+      </div>
+      <p class="custom-impact" id="custom-plan-impact" aria-live="polite" hidden></p>
+      <div class="custom-slots" role="group" aria-label="Площадки пары">
+        <div class="slot-control slot-one">
+          <button type="button" data-custom-slot="0" aria-pressed="true" aria-controls="coverage-map"><span>Площадка 1</span><strong data-custom-slot-id="0">Выбрать</strong></button>
+          <select id="custom-first" aria-label="Выбрать первую площадку из списка"><option value="">Выбрать из списка</option></select>
+          <div class="slot-actions">
+            <button type="button" data-pin-slot="0" aria-pressed="false" aria-label="Закрепить первую площадку" title="Сохранить эту площадку при подборе пары">Закрепить</button>
+            <button type="button" data-clear-slot="0" aria-label="Очистить первую площадку">Очистить</button>
+          </div>
+        </div>
+        <div class="slot-control slot-two">
+          <button type="button" data-custom-slot="1" aria-pressed="false" aria-controls="coverage-map"><span>Площадка 2</span><strong data-custom-slot-id="1">Выбрать</strong></button>
+          <select id="custom-second" aria-label="Выбрать вторую площадку из списка"><option value="">Выбрать из списка</option></select>
+          <div class="slot-actions">
+            <button type="button" data-pin-slot="1" aria-pressed="false" aria-label="Закрепить вторую площадку" title="Сохранить эту площадку при подборе пары">Закрепить</button>
+            <button type="button" data-clear-slot="1" aria-label="Очистить вторую площадку">Очистить</button>
+          </div>
+        </div>
+      </div>
+      <p class="custom-status" id="custom-status" role="status"></p>
+      <div class="optimizer">
+        <label>Недоступна <select id="custom-excluded" aria-label="Недоступная площадка"><option value="">Нет</option></select></label>
+        <button type="button" id="suggest-custom-pair">Подобрать пару</button>
+      </div>
+    </section>
+
+    <section class="stress-panel" id="stress-panel" aria-labelledby="stress-heading" hidden>
+      <h2 id="stress-heading">Охват при отказе одной станции</h2>
+      <div class="stress-front-heading" aria-hidden="true">
+        <span>Пара</span><span>Штатно</span><span>При худшем отказе</span>
+      </div>
+      <div class="stress-front" id="stress-front" role="group" aria-label="Варианты размещения станций"></div>
+      <p class="stress-delta" id="stress-delta" role="status"></p>
+      <div class="stress-actions" id="stress-actions" role="group" aria-label="Сценарий работы пары">
+        <button type="button" id="stress-normal" aria-pressed="true">Обе работают</button>
+        <button type="button" id="stress-worst" aria-pressed="false">Худший отказ</button>
+        <button type="button" id="stress-fail-first" aria-pressed="false">Отключить первую</button>
+        <button type="button" id="stress-fail-second" aria-pressed="false">Отключить вторую</button>
+      </div>
+      <button type="button" class="primary-action stress-plan-b" id="stress-plan-b" hidden>Подобрать замену</button>
+    </section>
+
+    <section class="profile-panel" id="buildings-panel" aria-labelledby="buildings-heading" hidden>
+      <div class="profile-heading">
+        <h2 id="buildings-heading" tabindex="-1">Проверка трассы</h2>
+        <p id="building-route" class="muted"></p>
+      </div>
+      <details class="profile-pairs" id="building-pairs">
+        <summary>Меняют ли здания выбор пары?</summary>
+        <p class="profile-status" id="building-official-evidence" role="status"></p>
+        <button type="button" id="building-show-gaps" aria-pressed="false">Где не хватает данных</button>
+        <button type="button" id="building-show-rooftop" aria-pressed="false" hidden>Сравнение по 2ГИС</button>
+        <div id="building-gap-panel" hidden>
+          <ul id="building-gap-counts" class="profile-witness-paths"></ul>
+          <label class="profile-gap-picker">Клетка на карте <select id="building-gap-cell"></select></label>
+          <p id="building-gap-detail" class="profile-status" role="status"></p>
+        </div>
+        <div id="building-rooftop-panel" class="profile-witness" hidden>
+          <label class="profile-gap-picker" id="building-study-picker">Клетка
+            <select id="building-study-cell"></select>
+          </label>
+          <strong id="building-rooftop-result"></strong>
+          <p class="profile-witness-caption" id="building-rooftop-signal"></p>
+          <table aria-label="Сравнение пар по дифракции на одной клетке">
+            <thead><tr><th scope="col">Пара и трасса</th><th scope="col">Рельеф → с крышами</th><th scope="col">Разброс с крышами</th></tr></thead>
+            <tbody id="building-rooftop-rows"></tbody>
+          </table>
+          <p class="profile-limits" id="building-rooftop-note"></p>
+          <details class="profile-roof-sources">
+            <summary>Этажность из 2ГИС и оценки высот</summary>
+            <ul id="building-rooftop-sources"></ul>
+          </details>
+          <button type="button" id="building-rooftop-focus">К трассам на карте</button>
+        </div>
+        <div id="building-pair-case" hidden>
+          <p class="profile-pair-result" id="building-pair-result"></p>
+          <table aria-label="Клетки в лимите потерь на общих проверенных трассах">
+            <thead><tr><th scope="col">В лимите</th><th scope="col" id="building-pair-ref"></th><th scope="col" id="building-pair-alt"></th></tr></thead>
+            <tbody id="building-pair-rows"></tbody>
+          </table>
+          <p class="profile-limits" id="building-pair-scope"></p>
+          <div class="profile-witness">
+            <strong id="building-witness-cell"></strong>
+            <p class="profile-witness-caption">Потери на трассах · рельеф → с крышами</p>
+            <ul id="building-witness-paths" class="profile-witness-paths"></ul>
+            <p class="profile-limits" id="building-witness-roof"></p>
+            <button type="button" id="building-witness-focus">К клетке на карте</button>
+          </div>
+        </div>
+      </details>
+      <div id="building-single">
+      <dl class="profile-measurement" id="building-measurement" hidden>
+        <div><dt>Медиана исходных замеров</dt><dd id="building-rsrp"></dd></div>
+        <div><dt>Замеров в клетке</dt><dd id="building-samples"></dd></div>
+      </dl>
+      <div class="profile-height">
+        <div class="profile-height-actions">
+          <span>Высота антенны</span>
+          <output id="building-height-value" for="building-height">25 м</output>
+          <button type="button" id="building-height-preset">Поднять до 40 м</button>
+        </div>
+      </div>
+      <div class="profile-loss" id="building-loss" hidden>
+        <p><strong id="building-roof-loss"></strong> <span>дополнительных потерь от крыш</span></p>
+        <p id="building-loss-breakdown"></p>
+      </div>
+      <p class="profile-status" id="building-status" role="status">
+        <strong id="building-verdict"></strong>
+        <span id="building-evidence"></span>
+      </p>
+      <svg class="profile-chart" id="building-chart" viewBox="0 0 340 118" role="img" aria-label="Профиль трассы" hidden></svg>
+      </div>
+      <details class="profile-options" id="building-options">
+        <summary>Настроить трассу</summary>
+        <div class="profile-endpoints" id="building-single-select">
+          <label>Площадка <select id="building-site"></select></label>
+          <label>Слабая клетка <select id="building-cell"></select></label>
+        </div>
+        <div class="profile-height">
+          <label for="building-height">Высота антенны</label>
+          <input type="range" id="building-height" min="5" max="80" step="5" value="25">
+        </div>
+        <div class="profile-endpoints">
+          <label>Частота модели
+            <select id="building-frequency">
+              <option value="900">900 МГц</option>
+              <option value="1800" selected>1 800 МГц</option>
+              <option value="2600">2 600 МГц</option>
+            </select>
+          </label>
+        </div>
+        <button type="button" id="building-focus">К трассе</button>
+        <dl class="profile-counts" id="building-counts" hidden>
+          <div><dt>Зданий на пути</dt><dd id="building-crossings">—</dd></div>
+          <div><dt>Перекрывают линию</dt><dd id="building-blocked">—</dd></div>
+          <div><dt>Без высоты</dt><dd id="building-unknown">—</dd></div>
+        </dl>
+        <p class="profile-limits">Дифракция над рельефом и крышами по ITU-R P.526. Приёмник на 1,5 м. Для прогноза RSRP нужны параметры сети и калибровка.</p>
+      </details>
+    </section>
+
+    <section class="map-panel" aria-label="Карта измерений">
+      <div class="map-stage">
+        <div id="coverage-map" aria-label="Интерактивная карта покрытия" role="region"></div>
+        <p id="gis-status" class="basemap-status" role="status" hidden></p>
+        <div class="signal-key" id="signal-legend" aria-label="Уровни сигнала" hidden>
+          <span class="legend-item"><i class="legend-chip is-strong" aria-hidden="true"></i> Уверенный · ≥ −90</span>
+          <span class="legend-item"><i class="legend-chip is-fair" aria-hidden="true"></i> Средний · −105 … &lt; −90</span>
+          <span class="legend-item"><i class="legend-chip is-weak" aria-hidden="true"></i> Слабый · &lt; −105 дБм</span>
+        </div>
+      </div>
+
+      <section class="radius-controls" id="radius-controls" aria-label="Чувствительность к радиусу" hidden>
+        <div class="radius-range">
+          <div class="radius-heading">
+            <label for="scenario-radius">Радиус в модели</label>
+            <output id="scenario-radius-value" for="scenario-radius">1 000 м</output>
+          </div>
+          <div class="radius-track">
+            <span>800 м</span>
+            <div>
+              <input type="range" id="scenario-radius" min="800" max="1200" step="100" value="1000" aria-describedby="radius-reference">
+              <span id="radius-reference">1 км · по ТЗ</span>
+            </div>
+            <span>1 200 м</span>
+          </div>
+        </div>
+        <dl class="radius-readout">
+          <dt>Лучшая пара</dt><dd id="radius-best">—</dd>
+          <dt>Базовая пара</dt><dd id="radius-baseline">—</dd>
+        </dl>
+        <button type="button" id="export-scenario" aria-label="Скачать сценарий JSON">Скачать сценарий</button>
+        <details class="radius-decision" id="radius-decision" hidden>
+          <summary>Выбор при неопределённом радиусе</summary>
+          <div class="radius-decision-body">
+            <div class="radius-decision-header">
+              <label>Диапазон <select id="radius-decision-range">
+                <option value="800-1200">800–1 200 м</option>
+                <option value="800-1000">800–1 000 м</option>
+                <option value="900-1100">900–1 100 м</option>
+                <option value="1000-1200">1 000–1 200 м</option>
+              </select></label>
+              <button type="button" id="radius-decision-map">Показать на карте</button>
+            </div>
+            <p class="radius-decision-note">Одна пара на весь диапазон. При каждом радиусе сравниваем её с лучшим охватом.</p>
+            <dl class="radius-decision-gaps" aria-label="Худшее отставание по числу слабых клеток" aria-live="polite">
+              <div><dt id="radius-decision-chosen"></dt><dd id="radius-decision-gap"></dd></div>
+              <div><dt id="radius-decision-base"></dt><dd id="radius-decision-base-gap"></dd></div>
+            </dl>
+            <table class="radius-decision-table">
+              <caption class="visually-hidden">Охват слабых клеток. Нажмите на радиус, чтобы открыть его на карте.</caption>
+              <thead><tr><th scope="col">Радиус</th><th scope="col">Максимум</th><th scope="col">Устойчивая</th><th scope="col">Базовая</th></tr></thead>
+              <tbody id="radius-decision-rows"></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+
+      <div class="map-foot">
+        <div class="compare-legend" id="compare-legend" role="group" aria-label="Фильтр различий между парами" hidden>
+          <div class="compare-filters">
+            <button type="button" class="compare-filter" data-compare-filter="shared" aria-pressed="true">
+              <i class="legend-chip is-shared" aria-hidden="true"></i><span>Обе пары</span><strong data-compare-count="shared"></strong>
+            </button>
+            <button type="button" class="compare-filter" data-compare-filter="optimal" aria-pressed="true">
+              <i class="legend-chip is-optimal" aria-hidden="true"></i><span>Только перебор</span><strong data-compare-count="optimal"></strong>
+            </button>
+            <button type="button" class="compare-filter" data-compare-filter="greedy" aria-pressed="true">
+              <i class="legend-chip is-greedy" aria-hidden="true"></i><span>Только жадная</span><strong data-compare-count="greedy"></strong>
+            </button>
+            <button type="button" class="compare-filter" data-compare-filter="residual" aria-pressed="true">
+              <i class="legend-chip is-residual" aria-hidden="true"></i><span>Ни одна</span><strong data-compare-count="residual"></strong>
+            </button>
+          </div>
+        </div>
+        <div class="custom-results" id="custom-legend" aria-label="Вклад площадок в охват пары" hidden>
+          <span><i class="legend-chip is-slot-one" aria-hidden="true"></i> Только площадка 1 <strong data-custom-count="first"></strong></span>
+          <span><i class="legend-chip is-slot-shared" aria-hidden="true"></i> Обе площадки <strong data-custom-count="shared"></strong></span>
+          <span><i class="legend-chip is-greedy" aria-hidden="true"></i> Только площадка 2 <strong data-custom-count="second"></strong></span>
+          <span><i class="legend-chip is-residual" aria-hidden="true"></i> Вне пары <strong data-custom-count="residual"></strong></span>
+        </div>
+        <div class="custom-results" id="custom-baseline-legend" aria-label="Изменение охвата относительно базовой пары" hidden>
+          <span><i class="legend-chip is-gain" aria-hidden="true"></i> Прирост <strong data-custom-count="gain"></strong></span>
+          <span><i class="legend-chip is-loss" aria-hidden="true"></i> Потеря <strong data-custom-count="loss"></strong></span>
+          <span><i class="legend-chip is-shared" aria-hidden="true"></i> Охват сохранился <strong data-custom-count="kept"></strong></span>
+          <span><i class="legend-chip is-uncovered" aria-hidden="true"></i> Вне обеих пар <strong data-custom-count="uncovered"></strong></span>
+        </div>
+        <div class="stress-legend" id="stress-legend" aria-label="Охват в выбранном сценарии" hidden>
+          <span><i class="legend-chip is-retained" aria-hidden="true"></i> <span id="stress-retained-label">В охвате</span> <strong data-stress-count="retained"></strong></span>
+          <span><i class="legend-chip is-loss" aria-hidden="true"></i> Потеряно при отказе <strong data-stress-count="lost"></strong></span>
+          <span><i class="legend-chip is-outside" aria-hidden="true"></i> Вне охвата пары <strong data-stress-count="uncovered"></strong></span>
+        </div>
+        <div class="map-legend profile-legend" id="buildings-legend" aria-label="Застройка на трассе" hidden>
+          <span class="legend-item"><i class="profile-line" aria-hidden="true"></i> Линия от антенны</span>
+          <span class="legend-item"><i class="legend-chip is-building-clear" aria-hidden="true"></i> Линия проходит мимо здания</span>
+          <span class="legend-item"><i class="legend-chip is-building-blocked" aria-hidden="true"></i> Здание пересекает линию</span>
+          <span class="legend-item"><i class="legend-chip is-building-unknown" aria-hidden="true"></i> Высота неизвестна</span>
+        </div>
+        <div class="map-legend profile-legend" id="buildings-pair-legend" aria-label="Сравнение трасс к клетке" hidden>
+          <span class="legend-item"><i class="profile-line is-pair-ref" aria-hidden="true"></i> Выше лимита</span>
+          <span class="legend-item"><i class="profile-line is-pair-alt" aria-hidden="true"></i> В пределах лимита</span>
+          <span class="legend-item" id="building-study-uncertain" hidden><i class="profile-line" aria-hidden="true"></i> Зависит от высот</span>
+        </div>
+        <div class="map-legend profile-legend" id="buildings-gap-legend" aria-label="Недостающие данные по паре из ТЗ" hidden>
+          <span class="legend-item"><i class="legend-chip radio-gap-heights" aria-hidden="true"></i> Нужны высоты крыш</span>
+          <span class="legend-item"><i class="legend-chip is-building-blocked" aria-hidden="true"></i> Точка в контуре</span>
+          <span class="legend-item"><i class="legend-chip is-building-unknown" aria-hidden="true"></i> Совпали точки</span>
+        </div>
+        <div class="map-legend" id="strategy-legend" aria-label="Покрытие слабых клеток" hidden>
+          <span class="legend-item"><i class="legend-chip is-covered" id="covered-chip" aria-hidden="true"></i> В радиусах пары</span>
+          <span class="legend-item"><i class="legend-chip is-residual" aria-hidden="true"></i> Вне радиусов пары</span>
+        </div>
+        <div class="map-legend site-legend" aria-label="Обозначения базовых станций">
+          <span class="legend-item" id="critical-legend" hidden><i class="legend-chip is-critical" aria-hidden="true"></i> Критические ≤ <span id="critical-legend-threshold"></span> дБм</span>
+          <span class="legend-item"><i class="legend-chip is-tower" aria-hidden="true"></i> Действующая БС</span>
+          <span class="legend-item" id="ring-legend" hidden><i class="legend-chip is-ring" aria-hidden="true"></i> До центра клетки ≤ <span id="ring-distance">1 000 м</span></span>
+        </div>
+        <div class="heat-legend" id="heat-legend" hidden>
+          <span>Плотность слабых клеток</span>
+          <span>Реже</span><span class="heat-scale" aria-hidden="true"></span><span>Плотнее</span>
+        </div>
+      </div>
+      <noscript>Для просмотра карты требуется JavaScript.</noscript>
+    </section>
+
+    <aside class="sidebar" aria-label="Сводка покрытия">
+      <section class="inspector" aria-live="polite">
+        <div class="inspector-header">
+          <h2 id="mode-label">Пара по ТЗ</h2>
+        </div>
+        <div class="metric-main"><strong id="metric-value">—</strong><span id="metric-label">слабых клеток в радиусе пары</span></div>
+        <div class="coverage-meter" id="coverage-meter" hidden><span id="coverage-fill"></span></div>
+        <p class="metric-caption" id="metric-caption"></p>
+      </section>
+
+      <section class="comparison-panel" aria-labelledby="strategy-heading" hidden>
+        <h2 id="strategy-heading" class="ledger-heading">Охват слабых клеток</h2>
+        <div class="strategy-list">
+          <button type="button" class="strategy-row is-optimal" data-select-mode="optimal">
+            <span class="strategy-row-head"><span>Полный перебор · по ТЗ</span><strong id="optimal-count"></strong></span>
+            <span class="strategy-row-detail" id="optimal-pair"></span>
+          </button>
+          <button type="button" class="strategy-row is-greedy" data-select-mode="greedy">
+            <span class="strategy-row-head"><span>Жадная пара</span><strong id="greedy-count"></strong></span>
+            <span class="strategy-row-detail" id="greedy-pair"></span>
+          </button>
+        </div>
+        <p class="muted" id="comparison-source" hidden>Пары выбраны по всем замерам. Охват показан за выбранный период.</p>
+      </section>
+
+      <details class="critical-panel" id="critical-panel" hidden>
+        <summary>Приоритет самых слабых клеток</summary>
+        <div class="critical-heading">
+          <label for="critical-threshold">Порог ≤</label>
+          <select id="critical-threshold" aria-label="Порог медианы RSRP для критических клеток">
+            <option value="-110">−110 дБм</option>
+            <option value="-115" selected>−115 дБм</option>
+            <option value="-120">−120 дБм</option>
+          </select>
+        </div>
+        <p class="muted" id="critical-empty" role="status" hidden>При этом пороге нет критических клеток.</p>
+        <div id="critical-comparison">
+          <table class="critical-table">
+            <caption class="visually-hidden">Сколько клеток попадёт в радиусы 1 км</caption>
+            <thead><tr><th scope="col">Пары при 1 км</th><th scope="col">Критические</th><th scope="col">Все слабые</th></tr></thead>
+            <tbody>
+              <tr class="critical-choice">
+                <th scope="row">Приоритетная <span id="critical-chosen-ids"></span></th>
+                <td id="critical-chosen-critical"></td><td id="critical-chosen-weak"></td>
+              </tr>
+              <tr>
+                <th scope="row">Базовая <span id="critical-base-ids"></span></th>
+                <td id="critical-base-critical"></td><td id="critical-base-weak"></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="critical-actions">
+            <p id="critical-difference" role="status"></p>
+            <button type="button" id="critical-map">Показать на карте</button>
+          </div>
+        </div>
+      </details>
+
+      <section class="locations">
+        <div class="site-row" id="chosen-sites" hidden>
+          <h2 id="sites-heading" class="ledger-heading">Площадки пары</h2>
+          <div class="site-pair" id="site-pair"></div>
+        </div>
+        <div class="ranked-heading">
+          <h2 class="ledger-heading">Худшие клетки</h2>
+        </div>
+        <ol class="ranked-cells" id="ranked-cells"></ol>
+      </section>
+
+    </aside>
+  </main>
+
+  <script>
+@@LEAFLET_JS@@
+  </script>
+  <script>
+@@HEAT_JS@@
+  </script>
+  <script type="application/json" id="map-data">
+@@MAP_DATA@@
+  </script>
+  <script type="application/json" id="basemap-data">
+@@BASEMAP_DATA@@
+  </script>
+  <script type="application/json" id="buildings-data">
+@@BUILDINGS_DATA@@
+  </script>
+  <script type="application/json" id="radio-data">
+@@RADIO_DATA@@
+  </script>
+  <script>
+@@PROFILE_UI_JS@@
+  </script>
+  <script>
+@@APP_JS@@
+  </script>
+</body>
+</html>

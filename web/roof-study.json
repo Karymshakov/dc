@@ -1,0 +1,21 @@
+{
+  "cell": "X012_Y013",
+  "target": [42.86428168336, 74.59066195189],
+  "official": ["C09", "C14"],
+  "alternative": ["C10", "C15"],
+  "origins": {
+    "C14": [42.86248304015, 74.59556786419],
+    "C15": [42.86787896978, 74.59066195189]
+  },
+  "rooftopSite": "C14",
+  "rooftop": "w88392617",
+  "storeyMetres": [2.5, 3, 4.5],
+  "sources": {
+    "w88392617": {"floors": 2, "name": "Корпус инфекционной больницы, Шабдан баатыра, 498", "link": "https://2gis.kg/bishkek/geo/15763234350964543"},
+    "w154279893": {"floors": 1, "name": "Шабдан баатыра, 498Б", "link": "https://2gis.kg/bishkek/geo/15763234351165228"},
+    "w154280264": {"floors": 2, "name": "Шабдан баатыра, 540–542", "link": "https://2gis.kg/bishkek/geo/15763234351036145"},
+    "w154648225": {"floors": 2, "name": "Шабдан баатыра, 544", "link": "https://2gis.kg/bishkek/geo/15763234351036150"},
+    "w135265138": {"floors": 5, "alternateFloors": 4, "name": "Шабдан баатыра, 546", "link": "https://2gis.kg/bishkek/geo/15763234351036190"},
+    "w167718952": {"floors": 2, "name": "Хозяйственный корпус", "link": "https://2gis.kg/bishkek/geo/70030076866500220"}
+  }
+}
