@@ -11,7 +11,6 @@ import pytest
 
 from faq_bot.normalize import fold, normalize, tokens, translit_to_cyrillic
 
-
 # --- normalize: что обязано произойти ---------------------------------------
 
 

@@ -381,7 +381,7 @@ def _bot_result(ticket: Ticket, language: str) -> str:
     if not ticket.question:
         # Вопроса не было вовсе — отвечать было нечего, и «ответа не
         # нашёл» здесь означало бы неудачу, которой не случилось.
-        return "—"
+        return "-"
     if ticket.faq_id is None:
         return _t(language, "ответа не нашёл", "жооп таппады")
     from .answer import entry_by_id
@@ -460,9 +460,9 @@ def queued_notice(ticket: Ticket,
     lines.append("")
     lines.append("<i>" + _esc(_t(
         language,
-        "Обращение в очереди CRM. Текста вопроса здесь нет — "
+        "Обращение в очереди CRM. Текста вопроса здесь нет, "
         "откройте очередь операторов.",
-        "Кайрылуу CRM кезегинде. Суроонун тексти бул жерде жок — "
+        "Кайрылуу CRM кезегинде. Суроонун тексти бул жерде жок, "
         "оператор кезегин ачыңыз.")) + "</i>")
     return Screen("\n".join(lines))
 

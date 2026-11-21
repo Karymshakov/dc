@@ -63,7 +63,7 @@ def normalize_login(login: str) -> str:
 
 def validate(login: str, name: str, password: str | None, role: str) -> None:
     if not LOGIN_RE.match(login):
-        raise ValueError("логин: 3–32 символа, латиница, цифры, точка, дефис, подчёркивание")
+        raise ValueError("логин: 3-32 символа, латиница, цифры, точка, дефис, подчёркивание")
     if not name.strip() or len(name.strip()) > 40:
         raise ValueError("имя: от 1 до 40 символов")
     if password is not None and len(password) < MIN_PASSWORD:

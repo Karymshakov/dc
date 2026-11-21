@@ -452,7 +452,8 @@ def test_button_press_answers_that_faq_id(faq_id):
     screen = bot.screen_for_action(f"faq:{faq_id}")
     text = presentation.plain_text(screen)
 
-    assert entry_by_id(faq_id).answer_ru in text
+    # Факты из базы без изменений; длинное тире заменено обычным знаком.
+    assert presentation.plain_dashes(entry_by_id(faq_id).answer_ru) in text
 
 
 def test_button_press_keeps_chat_language():
@@ -598,14 +599,14 @@ def test_a_question_about_support_still_gets_the_instruction():
     text = presentation.plain_text(
         presentation.operator_screen(entry_by_id(14), "ru"))
 
-    assert entry_by_id(14).answer_ru in text
+    assert presentation.plain_dashes(entry_by_id(14).answer_ru) in text
 
 
 def test_topic_14_by_button_is_an_ordinary_card():
     """Кнопка «как связаться с оператором» — обычная карточка темы."""
     text = presentation.plain_text(bot.screen_for_action("faq:14", 7))
 
-    assert entry_by_id(14).answer_ru in text
+    assert presentation.plain_dashes(entry_by_id(14).answer_ru) in text
 
 
 def test_ticket_note_is_added_only_after_real_delivery():
@@ -724,3 +725,26 @@ def test_presentation_does_not_import_telegram():
 
     assert "import telegram" not in text
     assert "from telegram" not in text
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("1 ГБ — 30 сом, 5 ГБ — 100 сом", "1 ГБ: 30 сом, 5 ГБ: 100 сом"),
+    ("ежедневно 09:00–18:00", "ежедневно 09:00–18:00"),
+    ("1 — совсем не помог, 5 — всё решил", "1: совсем не помог, 5: всё решил"),
+    ("Скажите короче — или напишите текстом", "Скажите короче или напишите текстом"),
+    ("Оператор видит обращение — ответ придёт сюда",
+     "Оператор видит обращение, ответ придёт сюда"),
+    ("без тире", "без тире"),
+])
+def test_plain_dashes_changes_the_sign_not_the_facts(raw, expected):
+    """Длинное тире уходит, числа и слова остаются на месте."""
+    assert presentation.plain_dashes(raw) == expected
+
+
+def test_no_screen_text_of_ours_has_a_long_dash():
+    """Свои тексты бот пишет без длинного тире: меню, справка, все темы."""
+    screens = [presentation.start_screen("ru"), presentation.start_screen("ky"),
+               presentation.help_screen("ru"), presentation.help_screen("ky")]
+    screens += [bot.screen_for_action(f"faq:{entry.id}") for entry in all_entries()]
+    for screen in screens:
+        assert "—" not in screen.text, screen.text

@@ -145,6 +145,29 @@ MENU_SECTIONS: tuple[MenuSection, ...] = (
 # Мелкие помощники
 # --------------------------------------------------------------------------
 
+_DASH = r"\s+—\s+"
+_DASH_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(_DASH + r"(?=(?:или|же)\b)"), " "),          # «… — или …»
+    (re.compile(r"(?<=[\d#])" + _DASH), ": "),               # «1 — совсем не помог»
+    (re.compile(r"(/\w+|ГБ|мин|SMS)" + _DASH), r"\1: "),     # «1 ГБ — 30 сом»
+    (re.compile(_DASH), ", "),                               # два предложения
+)
+
+
+def plain_dashes(text: str) -> str:
+    """Заменить длинное тире обычной пунктуацией.
+
+    В чате длинное тире читается как книжный текст, а не как ответ
+    справочной. Свои тексты мы пишем без него; эта функция нужна тому,
+    что приходит со стороны: ответам из `faq.json` и формулировке модели.
+    Смысл и числа не меняются, меняется только знак. Короткое тире в
+    диапазонах («09:00–18:00») остаётся как в базе.
+    """
+    for pattern, replacement in _DASH_RULES:
+        text = pattern.sub(replacement, text)
+    return text.replace("—", "-")
+
+
 def _esc(text: str) -> str:
     return html.escape(text or "", quote=False)
 
@@ -383,7 +406,7 @@ def answer_card(reply: Reply, mark: str | None = None,
         carried = _t(language, "по предыдущей теме", "мурунку тема боюнча")
         lines.append(f"<i>↪ {_esc(carried)}</i>")
     lines.append("")
-    lines.append(_esc(body if body else entry.answer(language)))
+    lines.append(_esc(plain_dashes(body if body else entry.answer(language))))
 
     # Код ищем в обоих переводах: в кыргызском тексте темы он иногда
     # записан, а в русском — нет, и наоборот.
@@ -471,7 +494,7 @@ def acknowledged_card(reply: Reply) -> Screen:
     """
     language = (reply.lang if reply.lang in config.LANGUAGES
                 else config.DEFAULT_LANGUAGE)
-    note = _t(language, "Готово. Будет ещё вопрос — просто напишите.",
+    note = _t(language, "Готово. Будет ещё вопрос, просто напишите.",
               "Болду. Дагы суроо болсо, жөн эле жазыңыз.")
     return answer_card(reply, mark="✅", note=note, rows=())
 
@@ -483,7 +506,7 @@ def acknowledged_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
     отправленного прежней версией бота. Пересобрать карточку не из чего,
     поэтому остаётся одна строка.
     """
-    text = _t(language, "✅ Готово. Будет ещё вопрос — просто напишите.",
+    text = _t(language, "✅ Готово. Будет ещё вопрос, просто напишите.",
               "✅ Болду. Дагы суроо болсо, жөн эле жазыңыз.")
     return Screen(text)
 
@@ -499,9 +522,9 @@ def another_question_card(reply: Reply) -> Screen:
     language = (reply.lang if reply.lang in config.LANGUAGES
                 else config.DEFAULT_LANGUAGE)
     note = _t(language,
-              "✍️ Напишите новый вопрос своими словами — этот ответ "
+              "✍️ Напишите новый вопрос своими словами, этот ответ "
               "останется здесь",
-              "✍️ Жаңы сурооңузду өз сөзүңүз менен жазыңыз — бул жооп "
+              "✍️ Жаңы сурооңузду өз сөзүңүз менен жазыңыз, бул жооп "
               "ордунда калат")
     return answer_card(reply, note=note,
                        rows=((_menu_button(), _operator_button()),))
@@ -611,9 +634,9 @@ def operator_screen(entry: FaqEntry | None,
         lines.append(_esc(message("operator_handoff", language)))
         facts = operator_facts(entry, language)
         if facts:
-            lines.append(_esc(facts))
+            lines.append(_esc(plain_dashes(facts)))
     elif entry is not None:
-        lines.append(_esc(entry.answer(language)))
+        lines.append(_esc(plain_dashes(entry.answer(language))))
     return Screen("\n".join(lines), ((_menu_button(),),))
 
 
@@ -664,10 +687,10 @@ def help_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
     lines = [
         f"<b>{_esc(head)}</b>",
         "",
-        "/start — " + _esc(_t(language, "меню", "меню")),
-        "/stats — " + _esc(stats),
-        "/why — " + _esc(why),
-        "/reset — " + _esc(reset),
+        "/start: " + _esc(_t(language, "меню", "меню")),
+        "/stats: " + _esc(stats),
+        "/why: " + _esc(why),
+        "/reset: " + _esc(reset),
         "",
         f"<i>{_esc(hint)}</i>",
     ]
@@ -719,7 +742,7 @@ def stats_screen(snapshot: StatsSnapshot,
         lines.append(f"<b>{_esc(header)}</b>")
         for faq_id, count in snapshot.nearest_topics:
             title = titles.get(faq_id, f"FAQ {faq_id}")
-            lines.append(f"  • {faq_id} · {_esc(_short(title, 48))} — {count}")
+            lines.append(f"  • {faq_id} · {_esc(_short(title, 48))}: {count}")
 
     if snapshot.examples:
         header = _t(language, "примеры формулировок", "мисалдар")
@@ -733,8 +756,7 @@ def stats_screen(snapshot: StatsSnapshot,
         lines.append("")
         lines.append(f"<b>{_esc(header)}</b>: {snapshot.operator_total}")
         for reason, count in snapshot.operator_reasons:
-            lines.append(f"  • {_esc(reason_label(reason, language))} "
-                         f"— {count}")
+            lines.append(f"  • {_esc(reason_label(reason, language))}: {count}")
 
     footer = _t(language, "только агрегат, без персональных данных",
                 "жалпы сандар, жеке маалыматсыз")
@@ -856,9 +878,9 @@ DEFAULT_RULES: Mapping[str, Any] = {
             "ky": "Балким, себеби ушунда:",
         },
         "no_more_advice": {
-            "ru": "Больше советов по этой теме у меня нет — передаю "
+            "ru": "Больше советов по этой теме у меня нет, передаю "
                   "оператору.",
-            "ky": "Бул тема боюнча менде башка кеңеш жок — операторго "
+            "ky": "Бул тема боюнча менде башка кеңеш жок, операторго "
                   "өткөрөм.",
         },
         "revised": {
@@ -882,8 +904,8 @@ DEFAULT_RULES: Mapping[str, Any] = {
         },
         "voice_no_key": {
             "ru": "Распознавание голоса недоступно. Напишите вопрос "
-                  "текстом — отвечу так же.",
-            "ky": "Үндү тааныбай жатам. Сурооңузду текст менен жазыңыз — "
+                  "текстом, отвечу так же.",
+            "ky": "Үндү тааныбай жатам. Сурооңузду текст менен жазыңыз, "
                   "ошол эле жообун берем.",
         },
         "voice_nothing": {
@@ -902,17 +924,17 @@ DEFAULT_RULES: Mapping[str, Any] = {
             "ky": "Кайрылуу кабыл алынды жана операторго белгиленди.",
         },
         "operator_queued": {
-            "ru": "Оператор уже видит обращение — ответ придёт в этот же чат.",
-            "ky": "Оператор кайрылууну көрүп турат — жооп ушул чатка келет.",
+            "ru": "Оператор уже видит обращение, ответ придёт в этот же чат.",
+            "ky": "Оператор кайрылууну көрүп турат, жооп ушул чатка келет.",
         },
         "operator_reply": {
             "ru": "🧑‍💼 Ответ оператора",
             "ky": "🧑‍💼 Оператордун жообу",
         },
         "operator_card_hint": {
-            "ru": "Ответьте реплаем на это сообщение — бот передаст текст "
+            "ru": "Ответьте реплаем на это сообщение, бот передаст текст "
                   "абоненту.",
-            "ky": "Бул билдирүүгө реплай менен жооп бериңиз — бот текстти "
+            "ky": "Бул билдирүүгө реплай менен жооп бериңиз, бот текстти "
                   "абонентке жеткирет.",
         },
         "operator_unknown": {
@@ -1508,7 +1530,7 @@ def alternatives_screen(entries: Sequence[FaqEntry],
     lines = [f"🔁 <b>{_esc(message('not_helping', language))}</b>"]
     if rejected is not None:
         tried = _t(language, "не помогло", "жардам бербеди")
-        lines.append(f"<i>✗ {_esc(rejected.question(language))} — "
+        lines.append(f"<i>✗ {_esc(rejected.question(language))}, "
                      f"{_esc(tried)}</i>")
 
     picked = list(entries)[:config.TOP_K]

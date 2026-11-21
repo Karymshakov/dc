@@ -35,11 +35,10 @@ import logging
 import os
 import re
 import secrets
+import socket
 import threading
 import time
-from http import HTTPStatus
 from http.cookies import SimpleCookie
-import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any

@@ -122,12 +122,12 @@ def _verdict_line(explanation: Explanation) -> str:
     decision = explanation.decision
     if explanation.level == "green":
         return (f"🟢 {decision.confidence:.2f} ≥ {config.CONFIDENCE_CONFIDENT:.2f}"
-                f" — отвечаем темой {decision.faq_id}")
+                f", отвечаем темой {decision.faq_id}")
     if explanation.level == "yellow":
-        return (f"🟡 {decision.confidence:.2f} между порогами — отвечаем темой "
+        return (f"🟡 {decision.confidence:.2f} между порогами, отвечаем темой "
                 f"{decision.faq_id} и предлагаем соседние")
     return (f"🔴 {decision.confidence:.2f} < {config.CONFIDENCE_THRESHOLD:.2f}"
-            " — не отвечаем, показываем три похожие темы кнопками")
+            ", не отвечаем, показываем три похожие темы кнопками")
 
 
 def render(explanation: Explanation,
@@ -149,7 +149,7 @@ def render(explanation: Explanation,
         "🔍 Почему бот ответил так",
         "",
         f"Вопрос: «{explanation.text.strip()}»",
-        f"Так его видит поиск: {explanation.normalized or '—'}",
+        f"Так его видит поиск: {explanation.normalized or 'ничего'}",
         "",
         f"1. Язык: {_LANGUAGE_NAMES.get(language, language)} "
         f"(улики ky {verdict.ky_score:g} : ru {verdict.ru_score:g})",
@@ -159,14 +159,14 @@ def render(explanation: Explanation,
     if len(verdict.signals) > len(signals):
         lines.append(f"   • …и ещё {len(verdict.signals) - len(signals)}")
     if not verdict.signals:
-        lines.append("   • улик нет — язык по умолчанию")
+        lines.append("   • улик нет, язык по умолчанию")
 
     lines += ["", "2. Два метода поиска"]
     for vote in explanation.votes:
         lines.append(f"   • {_METHOD_NAMES.get(vote.method, vote.method)}: "
                      f"{_title(vote.faq_id, by_id, language)} ({vote.raw:.2f})")
     lines.append("   Методы согласны." if explanation.methods_agree else
-                 "   Методы разошлись — в боте работает "
+                 "   Методы разошлись, в боте работает "
                  f"{_METHOD_SHORT.get(ranking.DEFAULT_METHOD, ranking.DEFAULT_METHOD)}: "
                  "он точнее на открытом наборе.")
 

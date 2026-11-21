@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from faq_bot.consistency import (Verdict, audit_knowledge, check, entry_facts,
-                                 extract_facts, safe_answer)
+from faq_bot.consistency import (
+    audit_knowledge,
+    check,
+    extract_facts,
+    safe_answer,
+)
 from faq_bot.contracts import FaqEntry
 from faq_bot.knowledge import load_faq
 

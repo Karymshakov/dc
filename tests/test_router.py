@@ -142,7 +142,7 @@ def test_model_choice_rewrites_refusal_with_verbatim_answer(monkeypatch):
     text = handle.edits[0]
     entry = next(item for item in all_entries() if item.id == 4)
     assert text.startswith("🤖")
-    assert "подсказала модель" in text
+    assert "подобрал ИИ" in text
     # Ответ — дословно из базы: модель дала только номер темы.
     assert entry.answer_ru.split(".")[0] in text
 

@@ -92,7 +92,6 @@ from pathlib import Path
 from typing import Any
 
 from . import config, explain, handoff, presentation
-from .bounded import BoundedDict, BoundedSet
 from .answer import (
     MEMORY,
     STATS,
@@ -105,6 +104,7 @@ from .answer import (
     respond,
     stats_snapshot,
 )
+from .bounded import BoundedDict, BoundedSet
 from .context import mentions_topic
 from .contracts import FaqEntry
 from .presentation import Screen
@@ -1204,7 +1204,7 @@ def stats_screen(chat_id: int | str | None = None) -> Screen:
 
 
 WHY_NO_QUESTION = (
-    "Пока нечего объяснять. Задайте вопрос и отправьте /why — "
+    "Пока нечего объяснять. Задайте вопрос и отправьте /why: "
     "или сразу: /why сколько стоит роуминг"
 )
 
@@ -1413,7 +1413,7 @@ async def _polish(chat_id: int | str | None, handle: Any) -> None:
     приписала цифру, съехала на другой язык, разговорилась вдвое — на
     экране остаётся текст из базы, и абонент ничего не замечает.
     """
-    from . import rephrase          # ключ и сеть нужны не каждому запуску
+    from . import rephrase  # ключ и сеть нужны не каждому запуску
 
     noted = _take_for_polish(chat_id)
     if noted is None or handle is None or not rephrase.ENABLED:
@@ -1444,10 +1444,10 @@ async def _polish(chat_id: int | str | None, handle: Any) -> None:
 
 
 SECOND_OPINION_NOTE = {
-    "ru": "Поиск не был уверен — тему подсказала модель. "
-          "Ответ дословно из базы.",
-    "ky": "Издөө ишенген жок — теманы модель сунуштады. "
-          "Жооп базадан сөзмө-сөз алынды.",
+    "ru": "Похоже, ваш вопрос об этом. Тему подобрал ИИ, "
+          "ответ взят из справочника.",
+    "ky": "Сурооңуз ушул жөнүндө окшойт. Теманы ЖИ тандады, "
+          "жооп маалымдамадан алынды.",
 }
 
 
@@ -1459,7 +1459,7 @@ async def _second_opinion(chat_id: int | str | None, handle: Any) -> None:
     Она возвращает только номер темы; ответ берётся из базы тем же
     путём, что и по нажатию кнопки. При любой неудаче кнопки остаются.
     """
-    from . import router            # ключ и сеть нужны не каждому запуску
+    from . import router  # ключ и сеть нужны не каждому запуску
 
     noted = _SECOND_OPINION.pop(_key(chat_id), None)
     if noted is None or handle is None or not router.ENABLED:
@@ -1485,7 +1485,7 @@ async def _second_opinion(chat_id: int | str | None, handle: Any) -> None:
     if reply is None:                              # pragma: no cover
         return
     conversation().serve(chat_id, reply.faq_id, "button")
-    logger.info("чат %s: второе мнение модели — тема %d", chat_id, reply.faq_id)
+    logger.info("чат %s: второе мнение модели: тема %d", chat_id, reply.faq_id)
     screen = presentation.answer_card(
         reply, mark="🤖", note=SECOND_OPINION_NOTE.get(reply.lang,
                                                       SECOND_OPINION_NOTE["ru"]))

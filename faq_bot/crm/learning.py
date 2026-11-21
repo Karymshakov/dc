@@ -148,11 +148,11 @@ class Learner:
                            **base)
         if not knowledge.content_terms(phrase):
             return Verdict(False, "no_terms",
-                           "В фразе нет значимых слов — учить нечему.", **base)
+                           "В фразе нет значимых слов, учить нечему.", **base)
         if self._is_dev_question(phrase):
             return Verdict(False, "dev_question",
                            "Фраза совпадает с вопросом открытого набора. "
-                           "Учить на нём — подгонка под проверку.", **base)
+                           "Учить на нём, подгонка под проверку.", **base)
         if any(knowledge.content_text(item) == knowledge.content_text(phrase)
                for item in current.get(faq_id, ())):
             return Verdict(False, "duplicate", "Эта фраза уже выучена.", **base)
@@ -183,7 +183,7 @@ class Learner:
                            "Похоже, тема выбрана неверно.", **common)
         if decided.faq_id != faq_id:
             return Verdict(True, "accepted_weak",
-                           "Принято. Сама фраза пока узнаётся неуверенно — "
+                           "Принято. Сама фраза пока узнаётся неуверенно, "
                            "ещё пара похожих отметок закрепит тему.", **common)
         return Verdict(True, "accepted",
                        "Принято: бот теперь отвечает на это темой "
