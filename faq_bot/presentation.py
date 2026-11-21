@@ -658,6 +658,7 @@ def help_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
     head = _t(language, "Помощь", "Жардам")
     stats = _t(language, "неотвеченные вопросы", "жооп табылбаган суроолор")
     reset = _t(language, "сбросить тему и язык", "теманы жана тилди тазалоо")
+    why = _t(language, "почему бот ответил так", "бот эмне үчүн ушундай жооп берди")
     hint = _t(language, "Вопрос можно писать своими словами",
               "Сурооңузду өз сөзүңүз менен жазсаңыз болот")
     lines = [
@@ -665,6 +666,7 @@ def help_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
         "",
         "/start — " + _esc(_t(language, "меню", "меню")),
         "/stats — " + _esc(stats),
+        "/why — " + _esc(why),
         "/reset — " + _esc(reset),
         "",
         f"<i>{_esc(hint)}</i>",

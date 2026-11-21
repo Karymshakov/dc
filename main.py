@@ -4,6 +4,7 @@
     python main.py ask "Как проверить баланс?"      ответ в JSON
     python main.py ask "А сколько стоит?" --chat 7  тот же чат, с контекстом
     python main.py ask "роуминг" --card             как это выглядит в боте
+    python main.py ask "роуминг канча" --why        почему бот ответил так
     python main.py eval --split tune --errors       точность по набору
     python main.py bot                              Telegram + CRM операторов
     python main.py crm                              только CRM, без Telegram
@@ -40,6 +41,13 @@ def command_ask(args: argparse.Namespace) -> int:
 
     reply = respond(args.text, chat_id=args.chat)
     print(json.dumps(reply.to_dict(), ensure_ascii=False))
+
+    if args.why:
+        from faq_bot import explain
+
+        print()
+        print(explain.render(explain.explain(args.text),
+                             inherited_from_context=reply.inherited_from_context))
 
     if args.card:
         from faq_bot import presentation
@@ -88,6 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="chat_id: включает контекст диалога")
     ask.add_argument("--card", action="store_true",
                      help="показать карточку ответа так, как её видит абонент")
+    ask.add_argument("--why", action="store_true",
+                     help="объяснить решение: язык, оба метода поиска, пороги")
     ask.set_defaults(handler=command_ask)
 
     evaluate = commands.add_parser(

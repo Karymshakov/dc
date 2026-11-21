@@ -80,6 +80,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import shutil
@@ -90,7 +91,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import config, handoff, presentation
+from . import config, explain, handoff, presentation
 from .bounded import BoundedDict, BoundedSet
 from .answer import (
     MEMORY,
@@ -151,6 +152,11 @@ CRM: Any | None = None
 # Последний результат поиска по чату: нужен CRM, чтобы показать оператору
 # тему и уверенность ответа и поставить непонятую реплику в обучение.
 _last_reply: BoundedDict[str, Reply] = BoundedDict()
+
+# Последний вопрос по чату для команды /why. Отдельно от `_last_reply`:
+# тот снимается, когда реплика уходит в обучение, а объяснить ответ
+# абонент вправе попросить и после этого.
+_last_question: BoundedDict[str, Reply] = BoundedDict()
 
 # Язык интерфейса по чатам: последний определённый или выбранный кнопкой.
 _chat_language: BoundedDict[str, str] = BoundedDict()
@@ -673,6 +679,7 @@ def reset_runtime_state() -> None:
     global _throttle, _flow
     _chat_language.clear()
     _last_reply.clear()
+    _last_question.clear()
     _chat_language_pinned.clear()
     _LAST_SEEN.clear()
     _RATING_ASKED.clear()
@@ -825,6 +832,7 @@ def screen_for_text(text: str,
 
     reply = respond(stripped, chat_id=chat_id, language=language)
     _last_reply[_key(chat_id)] = reply
+    _last_question[_key(chat_id)] = reply
     set_chat_language(chat_id, reply.lang)
     # Что бот ответил на этот вопрос — пригодится карточке обращения,
     # если следом абонент попросит человека: оператор увидит не только
@@ -1181,6 +1189,30 @@ def stats_screen(chat_id: int | str | None = None) -> Screen:
     """Экран /stats: агрегат неотвеченных вопросов без персональных данных."""
     return presentation.stats_screen(stats_snapshot(), all_entries(),
                                      chat_language(chat_id))
+
+
+WHY_NO_QUESTION = (
+    "Пока нечего объяснять. Задайте вопрос и отправьте /why — "
+    "или сразу: /why сколько стоит роуминг"
+)
+
+
+def why_screen(chat_id: int | str | None = None, text: str = "") -> Screen:
+    """Экран /why: как бот пришёл к ответу на вопрос.
+
+    С текстом после команды разбирается он, без текста — последний
+    вопрос этого чата. Чужие вопросы недоступны: память — по chat_id.
+    """
+    question = text.strip()
+    inherited = False
+    if not question:
+        last = _last_question.get(_key(chat_id))
+        if last is None:
+            return Screen(WHY_NO_QUESTION)
+        question, inherited = last.text, last.inherited_from_context
+    report = explain.render(explain.explain(question), all_entries(),
+                            inherited_from_context=inherited)
+    return Screen(html.escape(report, quote=False))
 
 
 # --------------------------------------------------------------------------
@@ -1605,6 +1637,13 @@ async def _on_stats(update: Any, context: Any) -> None:
     await _send(update.effective_message, stats_screen(chat_id))
 
 
+async def _on_why(update: Any, context: Any) -> None:
+    """/why — разбор решения: язык, оба метода поиска, пороги."""
+    chat_id = update.effective_chat.id
+    text = " ".join(getattr(context, "args", None) or ())
+    await _send(update.effective_message, why_screen(chat_id, text))
+
+
 async def _on_reset(update: Any, context: Any) -> None:
     """/reset — забыть тему диалога и выбранный язык."""
     chat_id = update.effective_chat.id
@@ -1877,6 +1916,7 @@ def build_application(token: str,
     application.add_handler(CommandHandler("start", _on_start))
     application.add_handler(CommandHandler("help", _on_help))
     application.add_handler(CommandHandler("stats", _on_stats))
+    application.add_handler(CommandHandler("why", _on_why))
     application.add_handler(CommandHandler("reset", _on_reset))
     application.add_handler(CallbackQueryHandler(_on_button))
     operator_chat = _operator_chat_filter()
