@@ -56,11 +56,17 @@ def model_is_off_unless_a_test_asks():
     тест, которому модель нужна, включает её сам и подставляет свой
     ответ. Прежние значения возвращаются после теста — иначе
     выключатель остался бы сломанным для остального прогона.
+
+    То же самое со вторым мнением (`faq_bot.router`): оно вызывается на
+    каждом отказе и ходит в сеть тем же транспортом, поэтому при
+    `LLM_ROUTER_ENABLED=1` в `.env` выключается здесь же.
     """
-    from faq_bot import rephrase
+    from faq_bot import rephrase, router
 
     saved_enabled = rephrase.ENABLED
     saved_transport = rephrase.transport
+    saved_router = router.ENABLED
+    router.ENABLED = False
 
     def forbidden(*args: object, **kwargs: object) -> dict:
         raise AssertionError(
@@ -72,4 +78,5 @@ def model_is_off_unless_a_test_asks():
     yield
     rephrase.ENABLED = saved_enabled
     rephrase.transport = saved_transport
+    router.ENABLED = saved_router
     rephrase.reset()
