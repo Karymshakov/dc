@@ -20,6 +20,7 @@ import asyncio
 import importlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -2373,3 +2374,98 @@ def test_crm_alone_is_enough_to_take_the_request(monkeypatch, crm):
     assert crm.requested, "CRM не получила запрос"
     assert context.bot.posted == [], "ушло в Telegram без настроенного чата"
     assert "оператор" in chat.last.lower(), "абонент не получил подтверждения"
+
+
+# --------------------------------------------------------------------------
+# Оценка работы после молчания
+# --------------------------------------------------------------------------
+#
+# Спрашиваем не сразу после ответа, а когда разговор кончился: только
+# тогда оценка относится к разговору целиком, а не к одной реплике.
+# И не чаще раза в несколько часов — бот, просящий оценку после каждого
+# вопроса, это спам, а не обратная связь.
+
+SILENCE = 300.0 + 1
+
+
+def test_silence_is_what_triggers_the_question():
+    """Пока абонент пишет, об оценке не спрашивают."""
+    bot.note_activity(9300)
+
+    assert bot.chats_to_ask() == []
+    assert bot.chats_to_ask(now=time.time() + SILENCE) == ["9300"]
+
+
+def test_the_same_chat_is_not_asked_twice_in_a_row():
+    """Одно молчание — одна просьба, и повтор отсечён по времени."""
+    bot.note_activity(9301)
+    moment = time.time() + SILENCE
+    assert bot.chats_to_ask(now=moment) == ["9301"]
+
+    bot.note_activity(9301)
+
+    assert bot.chats_to_ask(now=moment + SILENCE) == [], "спросили дважды подряд"
+
+
+def test_the_rating_card_offers_digits_not_words():
+    """Кнопки — цифры: цифра не имеет языка, как и в USSD-меню."""
+    screen = presentation.rating_screen("ky")
+
+    assert screen.actions() == ("rate:1", "rate:2", "rate:3", "rate:4", "rate:5")
+
+
+def test_a_rating_is_counted_and_the_card_is_redrawn():
+    from faq_bot.answer import stats_snapshot
+
+    screen = bot.screen_for_action("rate:5", chat_id=9302)
+
+    assert "5 / 5" in screen.text
+    assert screen.actions() == (), "кнопки остались, можно оценить дважды"
+    assert stats_snapshot().ratings_total == 1
+    assert stats_snapshot().rating_average == 5.0
+
+
+def test_a_low_rating_offers_a_human():
+    """«Спасибо» в ответ на «не помог» — это тупик."""
+    screen = bot.screen_for_action("rate:1", chat_id=9303)
+
+    assert "оператор" in screen.text.lower()
+
+
+def test_a_rating_outside_the_scale_changes_nothing():
+    from faq_bot.answer import stats_snapshot
+
+    for action in ("rate:0", "rate:9", "rate:", "rate:пять"):
+        bot.screen_for_action(action, chat_id=9304)
+
+    assert stats_snapshot().ratings_total == 0
+
+
+def test_the_question_is_not_asked_while_a_human_leads(monkeypatch):
+    """Посреди работы оператора «помог ли я» мешает обоим."""
+    pytest.importorskip("telegram")
+
+    class _Busy(_FakeHub):
+        def is_human(self, chat_id: object) -> bool:
+            return True
+
+    monkeypatch.setattr(bot, "CRM", _Busy())
+    bot.note_activity(9305)
+    context = _FakeContext()
+
+    asked = asyncio.run(bot.ask_ratings(context, now=time.time() + SILENCE))
+
+    assert asked == 0
+    assert context.bot.posted == []
+
+
+def test_the_card_reaches_a_silent_chat(monkeypatch):
+    pytest.importorskip("telegram")
+    monkeypatch.setattr(bot, "CRM", None)
+    bot.note_activity(9306)
+    context = _FakeContext()
+
+    asked = asyncio.run(bot.ask_ratings(context, now=time.time() + SILENCE))
+
+    assert asked == 1
+    assert "rate:" in str(context.bot.posted[0].markup) or context.bot.posted

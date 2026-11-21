@@ -460,3 +460,88 @@ def test_the_printed_address_is_the_real_port(capsys):
         assert ":0" not in printed
     finally:
         server.server_close()
+
+
+# --------------------------------------------------------------------------
+# Оценка работы бота попадает в сводку и в саму переписку
+# --------------------------------------------------------------------------
+
+def test_a_rating_lands_in_analytics_and_in_the_conversation():
+    from faq_bot.crm.hub import Hub
+    from faq_bot.crm.store import Store
+
+    hub = Hub(Store(":memory:"))
+    hub.client_message("777", "интернет не работает")
+
+    hub.rate("777", 4)
+    hub.rate("777", 2)
+    hub.rate("888", 5)
+
+    report = hub.analytics()
+    assert report["rating_count"] == 3
+    assert report["rating_avg"] == pytest.approx((4 + 2 + 5) / 3)
+    assert report["rating_low"] == 1, "оценка 2 не засчитана как низкая"
+    # Оператор, открыв диалог, обязан видеть, чем он кончился.
+    assert "2 из 5" in hub.store.messages("777")[-1]["text"]
+
+
+def test_no_ratings_means_no_average():
+    """Пустая сводка не должна показывать ноль как оценку."""
+    from faq_bot.crm.hub import Hub
+    from faq_bot.crm.store import Store
+
+    report = Hub(Store(":memory:")).analytics()
+
+    assert report["rating_count"] == 0
+    assert report["rating_avg"] is None
+
+
+def test_ratings_are_purged_with_the_rest_of_the_history():
+    """Оценка — такой же след разговора и живёт по тому же сроку."""
+    from faq_bot.crm.hub import Hub
+    from faq_bot.crm.store import Store
+
+    store = Store(":memory:")
+    hub = Hub(store, retention_days=30)
+    hub.rate("777", 5)
+    old = store.clock() - 40 * 86400
+    store._run("UPDATE ratings SET created_at = ?", (old,))
+
+    store.purge(30)
+
+    assert store.scalar("SELECT COUNT(*) FROM ratings") == 0
+
+
+def test_an_edited_interface_file_is_picked_up_without_a_restart(tmp_path, monkeypatch):
+    """Правка в app.js должна доезжать до браузера сама.
+
+    Раньше файл читался ровно один раз за жизнь процесса. Это стоило
+    получаса поисков: правка в интерфейсе была на диске, сервер отдавал
+    старый файл, и выглядело это как «новая возможность не работает».
+    Переменная CRM_DEV существовала, но знать о ней, чтобы увидеть
+    собственную правку, — плохая сделка.
+    """
+    from faq_bot.crm import server as crm_server
+
+    folder = tmp_path / "static"
+    folder.mkdir()
+    page = folder / "app.js"
+    page.write_text("первая версия", encoding="utf-8")
+    monkeypatch.setattr(crm_server, "STATIC_DIR", folder)
+    monkeypatch.setattr(crm_server, "_static_cache", {})
+
+    before = crm_server._static("app.js")
+    page.write_text("вторая версия, подлиннее", encoding="utf-8")
+    after = crm_server._static("app.js")
+
+    assert before is not None and after is not None
+    assert b"\xd0\xb2\xd1\x82\xd0\xbe\xd1\x80\xd0\xb0\xd1\x8f" in after[0]
+    assert before[2] != after[2], "etag не изменился — браузер не перечитает"
+
+
+def test_a_path_outside_the_interface_folder_is_refused():
+    """Выход за папку интерфейса невозможен."""
+    from faq_bot.crm import server as crm_server
+
+    for name in ("../store.py", "../../.env", "..\\hub.py"):
+        assert crm_server._static(name) is None

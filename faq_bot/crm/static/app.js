@@ -891,6 +891,14 @@ async function review(id, status) {
 
 /* ---------------- аналитика ---------------- */
 
+function plural(n, one, few, many) {
+  const mod100 = Math.abs(n) % 100, mod10 = mod100 % 10;
+  if (mod100 >= 11 && mod100 <= 14) return `${n} ${many}`;
+  if (mod10 === 1) return `${n} ${one}`;
+  if (mod10 >= 2 && mod10 <= 4) return `${n} ${few}`;
+  return `${n} ${many}`;
+}
+
 async function loadAnalytics() {
   let a;
   try { a = await api("GET", "/api/analytics"); } catch (error) { if (error.status !== 401) fail(error); return; }
@@ -904,6 +912,7 @@ async function loadAnalytics() {
     kpi("Медиана ответа оператора", a.median_wait != null ? duration(a.median_wait) : "—", a.p90_wait != null ? "90% — быстрее " + duration(a.p90_wait) : "за 7 дней"),
     kpi("Реплик за сутки", String(a.messages_today), `активных диалогов: ${a.active_today}`),
     kpi("Бот выучил", String(a.learned), `в очереди: ${a.queue} · предложений: ${a.proposals_pending}`),
+    kpi("Оценка абонентов", a.rating_avg != null ? a.rating_avg.toFixed(1) + " / 5" : "—", a.rating_count ? `${plural(a.rating_count, "оценка", "оценки", "оценок")} за 7 дней · низких: ${a.rating_low}` : "пока не оценивали", a.rating_avg == null ? "" : (a.rating_avg >= 4 ? "ok" : "bad")),
   );
 
   const max = Math.max(1, ...a.hours);

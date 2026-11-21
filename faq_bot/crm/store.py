@@ -73,6 +73,14 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS msg_chat ON messages(chat_id, id);
 CREATE INDEX IF NOT EXISTS msg_unanswered ON messages(unanswered, tag);
 
+CREATE TABLE IF NOT EXISTS ratings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id     TEXT NOT NULL,
+    score       INTEGER NOT NULL,
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rating_time ON ratings(created_at);
+
 CREATE TABLE IF NOT EXISTS learned (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     phrase      TEXT NOT NULL,
@@ -261,6 +269,17 @@ class Store:
              json.dumps(buttons, ensure_ascii=False) if buttons else None,
              wait, now))
 
+    def add_rating(self, chat_id: str, score: int) -> int:
+        """Записать оценку работы бота.
+
+        Храним только чат и число: ни текста, ни того, какой ответ
+        оценивали. Оценка относится к разговору целиком, а подробности
+        для сводки не нужны и собирать их не за что.
+        """
+        return self._run(
+            "INSERT INTO ratings (chat_id, score, created_at) VALUES (?,?,?)",
+            (str(chat_id), int(score), self.clock()))
+
     def edit_message(self, message_id: int, **fields: Any) -> None:
         allowed = {"text", "faq_id", "confidence", "unanswered", "tag", "buttons"}
         unknown = set(fields) - allowed
@@ -397,6 +416,9 @@ class Store:
             cursor = self._db.execute(
                 "DELETE FROM messages WHERE created_at < ?", (border,))
             removed = cursor.rowcount
+            # Оценки живут по тому же сроку: это тоже след разговора.
+            self._db.execute("DELETE FROM ratings WHERE created_at < ?",
+                             (border,))
             self._db.execute(
                 "DELETE FROM conversations WHERE updated_at < ? AND chat_id NOT IN"
                 " (SELECT DISTINCT chat_id FROM messages)", (border,))

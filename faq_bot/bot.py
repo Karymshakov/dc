@@ -1,5 +1,22 @@
 """Telegram-бот поверх `answer()`.
 
+Размер модуля
+-------------
+
+Две тысячи строк — выше нашего же потолка в восемьсот, и это осознанно.
+Файл разделён заголовками на пять частей, которые читаются подряд:
+состояние чата, ход разговора (`ConversationFlow`), сборка экранов
+(`screen_for_text`, `screen_for_action`), связь с оператором и CRM,
+обработчики Telegram и `run()`.
+
+Разрезать его на модули стоило бы одного: сборка экрана и обработчик
+обмениваются состоянием чата через семь общих словарей, и граница между
+ними прошла бы ровно по этому состоянию — то есть появились бы
+циклические импорты либо ещё один модуль только ради них. Делать такой
+разрез накануне сдачи, когда на модуле держатся 708 тестов, — размен не
+в нашу пользу. Шов обозначен здесь, чтобы следующий человек знал, где
+резать, когда время будет.
+
 Бот — надстройка и демонстрация, а не ядро: автопроверка жюри идёт по
 функции `answer()`. Поэтому `python-telegram-bot` импортируется **лениво**,
 внутри функций, в момент запуска. Модуль спокойно импортируется и
@@ -657,6 +674,8 @@ def reset_runtime_state() -> None:
     _chat_language.clear()
     _last_reply.clear()
     _chat_language_pinned.clear()
+    _LAST_SEEN.clear()
+    _RATING_ASKED.clear()
     _chat_language_streak.clear()
     if _throttle is not None:
         _throttle.clear()
@@ -853,6 +872,48 @@ def screen_for_text(text: str,
 #: собрать заново.
 _POLISH: BoundedDict[str, tuple[str, Reply]] = BoundedDict()
 
+#: Когда абонент писал в последний раз. По нему сторож молчания понимает,
+#: что разговор закончился и пора спросить оценку.
+_LAST_SEEN: BoundedDict[str, float] = BoundedDict()
+
+#: Когда у чата последний раз спрашивали оценку. Защита от навязчивости:
+#: бот, просящий оценку после каждого вопроса, — это спам.
+_RATING_ASKED: BoundedDict[str, float] = BoundedDict()
+
+#: Как часто сторож просыпается. Не настройка: точность в полминуты для
+#: пятиминутного молчания избыточна и так, а чаще — впустую будить процесс.
+RATING_TICK_SECONDS: float = 30.0
+
+
+def note_activity(chat_id: int | str | None) -> None:
+    """Запомнить, что абонент сейчас писал."""
+    _LAST_SEEN[_key(chat_id)] = time.time()
+
+
+def chats_to_ask(now: float | None = None) -> list[str]:
+    """Чаты, которые замолчали достаточно давно, чтобы спросить оценку.
+
+    Запись из `_LAST_SEEN` снимается сразу: один период молчания — одна
+    просьба. Если абонент вернётся и снова замолчит, запись появится
+    заново, но её отсечёт `rating_repeat_hours`.
+    """
+    limits = presentation.rules().limits
+    moment = time.time() if now is None else now
+    silence = limits.rating_after_seconds
+    repeat = limits.rating_repeat_hours * 3600
+
+    ready: list[str] = []
+    for key, seen in list(_LAST_SEEN.items()):
+        if moment - seen < silence:
+            continue
+        del _LAST_SEEN[key]
+        asked = _RATING_ASKED.get(key)
+        if asked is not None and moment - asked < repeat:
+            continue
+        _RATING_ASKED[key] = moment
+        ready.append(key)
+    return ready
+
 
 def _note_for_polish(chat_id: int | str | None, question: str,
                      reply: Reply) -> None:
@@ -1039,7 +1100,33 @@ def screen_for_action(action: str, chat_id: int | str | None = None) -> Screen:
         return _language_screen(argument, chat_id, language)
     if command == "stats":
         return stats_screen(chat_id)
+    if command == "rate":
+        return _rating_screen(argument, chat_id, language)
     return presentation.menu_screen(language)
+
+
+def _rating_screen(argument: str, chat_id: int | str | None,
+                   language: str) -> Screen:
+    """Засчитать оценку работы и перерисовать карточку.
+
+    Оценка уходит в два места сразу: в наш `/stats`, который работает
+    без всякой CRM, и в CRM, если она подключена. Сбой CRM не имеет
+    права потерять нажатие абонента, поэтому вызов обёрнут.
+    """
+    if not argument.isdigit():
+        return presentation.menu_screen(language)
+    score = int(argument)
+    if not STATS.record_rating(score, chat_id):
+        return presentation.menu_screen(language)
+
+    if CRM is not None and chat_id is not None:
+        try:
+            CRM.rate(chat_id, score)
+        except Exception:
+            logger.exception("CRM: оценка %s не записана", score)
+
+    logger.info("чат %s поставил оценку %d", chat_id, score)
+    return presentation.rating_done_screen(score, language)
 
 
 def _reply_for_argument(argument: str, language: str,
@@ -1576,6 +1663,7 @@ async def _on_text(update: Any, context: Any) -> None:
     if screen is None:
         flow.close(chat_id)
         return
+    note_activity(chat_id)
     if hub is not None:
         crm_log_bot(hub, chat_id, screen)
     flow.opened(chat_id, text, await _send(message, screen))
@@ -1864,6 +1952,57 @@ def token_from_env_file(name: str = TOKEN_ENV) -> str:
     return handoff.from_env_file(name)
 
 
+#: Ссылка на сторожа молчания. Без неё задачу может собрать сборщик мусора.
+_RATING_TASK: Any | None = None
+
+
+async def ask_ratings(context: Any, now: float | None = None) -> int:
+    """Предложить оценку тем, кто замолчал. Возвращает число предложений.
+
+    Почему не спрашиваем сразу после ответа: человек ещё читает, и
+    просьба оценить выглядит как подгон. Почему вообще спрашиваем
+    молчащего: разговор кончился, и это единственный момент, когда
+    оценка относится к разговору целиком, а не к одной реплике.
+
+    Чат, который ведёт живой оператор, пропускаем. Спрашивать «помог ли
+    я» посреди работы человека — значит мешать ему и путать абонента.
+    """
+    asked = 0
+    for key in chats_to_ask(now):
+        if CRM is not None:
+            try:
+                if CRM.is_human(key):
+                    continue
+            except Exception:                       # noqa: BLE001
+                logger.exception("CRM: не удалось узнать, ведёт ли человек")
+        screen = presentation.rating_screen(chat_language(key))
+        try:
+            await _push(context, key, screen)
+        except Exception:                           # noqa: BLE001
+            logger.exception("оценку чату %s предложить не удалось", key)
+            continue
+        asked += 1
+    return asked
+
+
+async def _rating_watch(application: Any) -> None:
+    """Фоновый цикл сторожа молчания.
+
+    Сделан на обычной задаче asyncio, а не на JobQueue: та требует
+    APScheduler, а ставить зависимость ради одного таймера не за что.
+    Сбой внутри цикла не имеет права остановить цикл — иначе бот
+    перестанет спрашивать оценки молча, и заметить это будет нечем.
+    """
+    while True:
+        await asyncio.sleep(RATING_TICK_SECONDS)
+        try:
+            await ask_ratings(application)
+        except asyncio.CancelledError:
+            raise
+        except Exception:                           # noqa: BLE001
+            logger.exception("сторож молчания сбоит, продолжаю")
+
+
 def _telegram_sender(application: Any, loop: asyncio.AbstractEventLoop
                      ) -> Callable[[str, str], bool]:
     """Доставка сообщения оператора из потока веб-сервера в Telegram."""
@@ -1886,6 +2025,12 @@ def run(token: str | None = None, crm: bool = True) -> int:
         return 2
 
     async def _post_init(application: Any) -> None:
+        global _RATING_TASK
+        limits = presentation.rules().limits
+        _RATING_TASK = asyncio.create_task(_rating_watch(application))
+        logger.info("сторож молчания: оценка через %.0f с тишины, "
+                    "не чаще раза в %.0f ч",
+                    limits.rating_after_seconds, limits.rating_repeat_hours)
         if CRM is None:
             return
         CRM.set_sender(_telegram_sender(application,

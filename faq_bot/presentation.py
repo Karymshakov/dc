@@ -703,6 +703,13 @@ def stats_screen(snapshot: StatsSnapshot,
                                for name, count in snapshot.by_language.items())
         lines.append(f"{_t(language, 'языки', 'тилдер')}: {languages}")
 
+    if snapshot.ratings_total:
+        # Оценку ставят сами абоненты после молчания; показываем её рядом
+        # с долей неотвеченных, потому что вместе они и означают качество.
+        label = _t(language, "оценка абонентов", "абоненттердин баасы")
+        lines.append(f"{label}: <b>{snapshot.rating_average:.1f}</b> / 5 "
+                     f"({snapshot.ratings_total})")
+
     if snapshot.nearest_topics:
         header = _t(language, "чаще всего не находились темы",
                     "эң көп табылбаган темалар")
@@ -799,6 +806,8 @@ DEFAULT_RULES: Mapping[str, Any] = {
         "revise_window_seconds": 9.0,
         "read_seconds": 3.0,
         "max_revisions": 6,
+        "rating_after_seconds": 300.0,
+        "rating_repeat_hours": 6.0,
     },
     "messages": {
         "greeting": {
@@ -952,6 +961,10 @@ class Limits:
     revise_window_seconds: float
     read_seconds: float
     max_revisions: int
+    #: Через сколько секунд молчания просить оценку работы.
+    rating_after_seconds: float = 300.0
+    #: Не чаще чем раз в столько часов спрашивать один и тот же чат.
+    rating_repeat_hours: float = 6.0
 
 
 @dataclass(frozen=True)
@@ -1139,6 +1152,12 @@ def _build_rules(raw: Any, source: str) -> BotRules:
                                default_limits["read_seconds"]),
         max_revisions=int(_positive(limits_data.get("max_revisions"),
                                     default_limits["max_revisions"])),
+        rating_after_seconds=_positive(
+            limits_data.get("rating_after_seconds"),
+            default_limits["rating_after_seconds"]),
+        rating_repeat_hours=_positive(
+            limits_data.get("rating_repeat_hours"),
+            default_limits["rating_repeat_hours"]),
     )
 
     refusal_data = data.get("refusal")
@@ -1383,6 +1402,49 @@ def notice_screen(name: str, language: str = config.DEFAULT_LANGUAGE,
     if not with_menu:
         return Screen(text)
     return Screen(text, ((_menu_button(), _operator_button()),))
+
+
+#: Возможные оценки. Пять делений, как привычная школьная шкала.
+RATING_SCORES: tuple[int, ...] = (1, 2, 3, 4, 5)
+
+#: Ниже этой оценки к благодарности добавляется предложение оператора.
+RATING_LOW: int = 2
+
+
+def rating_screen(language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """Просьба оценить работу после долгого молчания.
+
+    Кнопки — голые цифры, и это то же решение, что у USSD-меню (D-06):
+    цифра не имеет языка. Её нажмёт и тот, кто плохо читает по-русски,
+    и тот, кто по-кыргызски, и ошибиться в ней нельзя.
+
+    Шкала подписана прямо в тексте — «1 совсем не помог, 5 всё решил», —
+    потому что без подписи пять кнопок читаются как номера тем, а
+    номерами тем в этом боте и правда пользуются.
+    """
+    row = tuple(Button(str(score), f"rate:{score}") for score in RATING_SCORES)
+    return Screen(f"⭐ {_esc(message('rating_ask', language))}", (row,))
+
+
+def rating_done_screen(score: int,
+                       language: str = config.DEFAULT_LANGUAGE) -> Screen:
+    """Экран после нажатия: оценка видна, кнопок больше нет.
+
+    Карточка не исчезает и не превращается в новое сообщение — она
+    перерисовывается на месте, как и везде в этом боте. Оценка остаётся
+    на экране: иначе непонятно, засчиталось ли нажатие.
+
+    На низкой оценке благодарности мало. Человек сказал, что мы не
+    помогли; ответ «спасибо» без предложения помощи — это тупик.
+    """
+    stars = "⭐" * max(1, min(score, len(RATING_SCORES)))
+    lines = [f"{stars} <b>{score} / {len(RATING_SCORES)}</b>",
+             "",
+             _esc(message("rating_thanks", language))]
+    if score <= RATING_LOW:
+        lines.append("")
+        lines.append(f"<i>{_esc(message('rating_low_hint', language))}</i>")
+    return Screen("\n".join(lines))
 
 
 #: До какой длины показывать распознанную речь. Эхо нужно, чтобы абонент

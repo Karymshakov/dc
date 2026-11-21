@@ -144,19 +144,38 @@ class ApiError(Exception):
         self.message = message
 
 
-_static_cache: dict[str, tuple[bytes, bytes, str]] = {}
+#: Кеш файлов интерфейса: имя -> (отпечаток файла, сырой, сжатый, etag).
+#:
+#: Отпечаток — время правки и размер. Раньше файл читался ровно один раз
+#: за жизнь процесса, и это стоило нам получаса: правку в app.js сервер
+#: продолжал не замечать, браузер получал старый файл, и выглядело это
+#: как «новая возможность не работает». Переменная CRM_DEV существовала,
+#: но знать о ней, чтобы увидеть собственную правку, — плохая сделка.
+#:
+#: Цена проверки — один `stat()` на запрос. Сжатие и хэш по-прежнему
+#: считаются только когда файл действительно изменился.
+_static_cache: dict[str, tuple[tuple[float, int], bytes, bytes, str]] = {}
 
 
 def _static(name: str) -> tuple[bytes, bytes, str] | None:
-    """Файл интерфейса: (сырой, сжатый, etag). Читается один раз."""
-    if name in _static_cache and not os.environ.get("CRM_DEV"):
-        return _static_cache[name]
+    """Файл интерфейса: (сырой, сжатый, etag). Правка подхватывается сама."""
     path = (STATIC_DIR / name).resolve()
     if STATIC_DIR.resolve() not in path.parents or not path.is_file():
         return None
+    try:
+        info = path.stat()
+        stamp = (info.st_mtime, info.st_size)
+    except OSError:                                 # pragma: no cover
+        return None
+
+    cached = _static_cache.get(name)
+    if cached is not None and cached[0] == stamp:
+        return cached[1:]
+
     raw = path.read_bytes()
-    entry = (raw, gzip.compress(raw, 6), '"' + hashlib.sha1(raw).hexdigest()[:16] + '"')
-    _static_cache[name] = entry
+    entry = (raw, gzip.compress(raw, 6),
+             '"' + hashlib.sha1(raw).hexdigest()[:16] + '"')
+    _static_cache[name] = (stamp, *entry)
     return entry
 
 

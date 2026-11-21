@@ -369,6 +369,20 @@ class Hub:
 
     # --- аналитика ---------------------------------------------------------
 
+    def rate(self, chat_id: str | int, score: int) -> None:
+        """Записать оценку работы, поставленную абонентом в боте.
+
+        Кроме строки в сводке оставляем системную реплику в самой
+        переписке: оператор, открыв диалог, должен видеть, чем он
+        кончился, а не искать оценку в другом разделе.
+        """
+        chat = str(chat_id)
+        self.store.ensure(chat)
+        self.store.add_rating(chat, int(score))
+        self.store.add_message(
+            chat, st.SYSTEM, f"Абонент оценил работу бота: {int(score)} из 5")
+        self.store.feed.bump()
+
     def analytics(self) -> dict[str, Any]:
         s = self.store
         now = s.clock()
@@ -386,6 +400,13 @@ class Hub:
                           " AND created_at > ?", (day,)):
             index = int((row["created_at"] - day) // 3600)
             hours[min(23, max(0, index))] += 1
+        week = now - 7 * 86400
+        rating_count = s.scalar("SELECT COUNT(*) FROM ratings"
+                                " WHERE created_at > ?", (week,)) or 0
+        rating_sum = s.scalar("SELECT SUM(score) FROM ratings"
+                              " WHERE created_at > ?", (week,)) or 0
+        rating_low = s.scalar("SELECT COUNT(*) FROM ratings WHERE score <= 2"
+                              " AND created_at > ?", (week,)) or 0
         oldest = s.scalar("SELECT MIN(waiting_since) FROM conversations"
                           " WHERE waiting_since IS NOT NULL")
         return {
@@ -398,6 +419,9 @@ class Hub:
             "with_operator": s.scalar("SELECT COUNT(*) FROM conversations"
                                       " WHERE status = 'operator'") or 0,
             "oldest_wait": (now - oldest) if oldest else 0,
+            "rating_count": rating_count,
+            "rating_avg": (rating_sum / rating_count) if rating_count else None,
+            "rating_low": rating_low,
             "messages_today": s.scalar("SELECT COUNT(*) FROM messages WHERE dir = 'in'"
                                        " AND created_at > ?", (day,)) or 0,
             "bot_answered": answered,

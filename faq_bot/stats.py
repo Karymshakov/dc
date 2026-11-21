@@ -33,6 +33,11 @@ MAX_RECORDS: int = 500
 # До какой длины обрезаем пример формулировки.
 EXAMPLE_LENGTH: int = 60
 
+# Шкала оценки работы бота. Совпадает с presentation.RATING_SCORES, но
+# объявлена здесь отдельно: модуль статистики не должен зависеть от
+# слоя показа, иначе /stats нельзя будет посчитать без Telegram.
+RATING_RANGE: frozenset[int] = frozenset({1, 2, 3, 4, 5})
+
 _DIGITS_RE = re.compile(r"\d{4,}")
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+", re.UNICODE)
 _NICK_RE = re.compile(r"(?<!\w)@\w+", re.UNICODE)
@@ -79,6 +84,13 @@ class StatsSnapshot:
     examples: tuple[str, ...] = ()
     operator_total: int = 0
     operator_reasons: tuple[tuple[str, int], ...] = ()
+    ratings_total: int = 0
+    ratings_sum: int = 0
+
+    @property
+    def rating_average(self) -> float:
+        """Средняя оценка в [1, 5]; ноль, когда не оценивал никто."""
+        return self.ratings_sum / self.ratings_total if self.ratings_total else 0.0
 
     @property
     def unanswered_share(self) -> float:
@@ -105,6 +117,7 @@ class StatsCollector:
         self._history: deque[tuple[str, bool]] = deque(maxlen=64)
         self._chats: set[str] = set()
         self._operator_reasons: Counter[str] = Counter()
+        self._ratings: Counter[int] = Counter()
 
     def record(self,
                text: str,
@@ -181,6 +194,21 @@ class StatsCollector:
         if chat_id is not None:
             self._chats.add(_fingerprint(chat_id))
 
+    def record_rating(self, score: int,
+                      chat_id: int | str | None = None) -> bool:
+        """Учесть оценку работы. Вне шкалы — не учитываем.
+
+        Как и у передачи оператору, здесь только число: ни текста, ни
+        chat_id. Для сводки этого достаточно, а лишнего о человеке мы не
+        собираем (см. заголовок модуля).
+        """
+        if score not in RATING_RANGE:
+            return False
+        self._ratings[int(score)] += 1
+        if chat_id is not None:
+            self._chats.add(_fingerprint(chat_id))
+        return True
+
     def snapshot(self, examples: int = 5, topics: int = 3) -> StatsSnapshot:
         """Агрегат для показа. Не падает на пустой истории."""
         counter: Counter[int] = Counter(
@@ -198,6 +226,9 @@ class StatsCollector:
             examples=tuple(item.text for item in recent),
             operator_total=sum(self._operator_reasons.values()),
             operator_reasons=tuple(self._operator_reasons.most_common()),
+            ratings_total=sum(self._ratings.values()),
+            ratings_sum=sum(score * count
+                            for score, count in self._ratings.items()),
         )
 
     def reset(self) -> None:
@@ -209,3 +240,4 @@ class StatsCollector:
         self._by_language.clear()
         self._chats.clear()
         self._operator_reasons.clear()
+        self._ratings.clear()
