@@ -234,7 +234,8 @@ def test_zero_calls_operator():
     """
     text = presentation.plain_text(bot.screen_for_text("0"))
 
-    assert presentation.operator_facts(entry_by_id(14), "ru") in text
+    assert presentation.plain_dashes(
+        presentation.operator_facts(entry_by_id(14), "ru")) in text
     assert "Напишите «оператор»" not in text
 
 
@@ -528,7 +529,8 @@ def test_operator_word_reaches_operator():
     text = presentation.plain_text(bot.screen_for_text("оператор", 7))
 
     assert "Попросили оператора" in text
-    assert presentation.operator_facts(entry_by_id(14), "ru") in text
+    assert presentation.plain_dashes(
+        presentation.operator_facts(entry_by_id(14), "ru")) in text
 
 
 # --------------------------------------------------------------------------
@@ -557,7 +559,8 @@ def test_handoff_keeps_the_facts_from_the_base():
     text = presentation.plain_text(
         presentation.operator_screen(entry_by_id(14), "ru", "complaint"))
 
-    assert "09:00–18:00" in text
+    # Часы берутся из базы; на экране тире диапазона показано дефисом.
+    assert "09:00-18:00" in text
     assert "09:00–18:00" in entry_by_id(14).answer_ru
 
 
@@ -729,7 +732,7 @@ def test_presentation_does_not_import_telegram():
 
 @pytest.mark.parametrize("raw, expected", [
     ("1 ГБ — 30 сом, 5 ГБ — 100 сом", "1 ГБ: 30 сом, 5 ГБ: 100 сом"),
-    ("ежедневно 09:00–18:00", "ежедневно 09:00–18:00"),
+    ("ежедневно 09:00–18:00", "ежедневно 09:00-18:00"),
     ("1 — совсем не помог, 5 — всё решил", "1: совсем не помог, 5: всё решил"),
     ("Скажите короче — или напишите текстом", "Скажите короче или напишите текстом"),
     ("Оператор видит обращение — ответ придёт сюда",
@@ -747,4 +750,4 @@ def test_no_screen_text_of_ours_has_a_long_dash():
                presentation.help_screen("ru"), presentation.help_screen("ky")]
     screens += [bot.screen_for_action(f"faq:{entry.id}") for entry in all_entries()]
     for screen in screens:
-        assert "—" not in screen.text, screen.text
+        assert "—" not in screen.text and "–" not in screen.text, screen.text

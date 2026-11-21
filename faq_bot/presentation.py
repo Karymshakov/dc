@@ -161,11 +161,11 @@ def plain_dashes(text: str) -> str:
     справочной. Свои тексты мы пишем без него; эта функция нужна тому,
     что приходит со стороны: ответам из `faq.json` и формулировке модели.
     Смысл и числа не меняются, меняется только знак. Короткое тире в
-    диапазонах («09:00–18:00») остаётся как в базе.
+    диапазонах («09:00–18:00») становится дефисом.
     """
     for pattern, replacement in _DASH_RULES:
         text = pattern.sub(replacement, text)
-    return text.replace("—", "-")
+    return text.replace("—", "-").replace("–", "-")
 
 
 def _esc(text: str) -> str:

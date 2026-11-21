@@ -610,7 +610,8 @@ def test_second_refusal_hands_the_dialog_to_a_human():
     screen = bot.screen_for_text("всё равно не работает", 102)
     rendered = _text(screen)
 
-    assert presentation.operator_facts(entry_by_id(14), "ru") in rendered
+    assert presentation.plain_dashes(
+        presentation.operator_facts(entry_by_id(14), "ru")) in rendered
     assert "Напишите «оператор»" not in rendered
     assert "Совет не помог" in rendered
     assert "Больше советов по этой теме" in rendered
@@ -1505,7 +1506,8 @@ def test_operator_word_still_reaches_operator():
     rendered = _text(bot.screen_for_text("оператор", 41))
 
     assert "Попросили оператора" in rendered
-    assert presentation.operator_facts(entry_by_id(14), "ru") in rendered
+    assert presentation.plain_dashes(
+        presentation.operator_facts(entry_by_id(14), "ru")) in rendered
     assert "Напишите «оператор»" not in rendered
 
 
