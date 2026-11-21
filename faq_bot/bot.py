@@ -680,6 +680,7 @@ def reset_runtime_state() -> None:
     _chat_language.clear()
     _last_reply.clear()
     _last_question.clear()
+    _SECOND_OPINION.clear()
     _chat_language_pinned.clear()
     _LAST_SEEN.clear()
     _RATING_ASKED.clear()
@@ -859,7 +860,13 @@ def screen_for_text(text: str,
             return _refusal_screen(refused, reply, chat_id, reply.lang)
 
     if reply.faq_id is None:
-        screen = _maybe_offer_operator(screen, chat_id, reply)
+        offered = _maybe_offer_operator(screen, chat_id, reply)
+        if offered is screen and not revision:
+            # Простая красная карточка с тремя кнопками: здесь модель
+            # вправе дать второе мнение. Если уже предложен оператор —
+            # решает человек, модель не вмешивается.
+            _SECOND_OPINION[_key(chat_id)] = (stripped, reply)
+        screen = offered
     elif not revision:
         # Тема найдена, обёрток не добавлялось, абонент ещё не дописывал:
         # эту карточку переформулировка вправе переписать. Дозревание
@@ -879,6 +886,11 @@ def screen_for_text(text: str,
 #: условие безопасности: переписывать можно только то, что мы умеем
 #: собрать заново.
 _POLISH: BoundedDict[str, tuple[str, Reply]] = BoundedDict()
+
+#: Последний отказ чата: вопрос и разбор. Нужен второму мнению модели
+#: (`faq_bot.router`), которое, как и переформулировка, идёт после
+#: отправки и правит то же сообщение.
+_SECOND_OPINION: BoundedDict[str, tuple[str, Reply]] = BoundedDict()
 
 #: Когда абонент писал в последний раз. По нему сторож молчания понимает,
 #: что разговор закончился и пора спросить оценку.
@@ -1431,6 +1443,57 @@ async def _polish(chat_id: int | str | None, handle: Any) -> None:
                     chat_id)
 
 
+SECOND_OPINION_NOTE = {
+    "ru": "Поиск не был уверен — тему подсказала модель. "
+          "Ответ дословно из базы.",
+    "ky": "Издөө ишенген жок — теманы модель сунуштады. "
+          "Жооп базадан сөзмө-сөз алынды.",
+}
+
+
+async def _second_opinion(chat_id: int | str | None, handle: Any) -> None:
+    """Красная карточка: спросить у модели, какую кнопку нажать.
+
+    Устроено как :func:`_polish`: абонент уже получил три кнопки и может
+    нажать сам, модель работает после отправки и правит то же сообщение.
+    Она возвращает только номер темы; ответ берётся из базы тем же
+    путём, что и по нажатию кнопки. При любой неудаче кнопки остаются.
+    """
+    from . import router            # ключ и сеть нужны не каждому запуску
+
+    noted = _SECOND_OPINION.pop(_key(chat_id), None)
+    if noted is None or handle is None or not router.ENABLED:
+        return
+    question, refused = noted
+
+    try:
+        choice = await asyncio.to_thread(
+            router.choose, question, all_entries(), chat_id=_key(chat_id))
+    except Exception as error:                     # последний рубеж
+        logger.warning("второе мнение не удалось: %s", error)
+        return
+    if choice.faq_id is None:
+        logger.info("чат %s: второе мнение не дало темы (%s)",
+                    chat_id, choice.reason)
+        return
+    if _last_question.get(_key(chat_id)) is not refused:
+        # Пока модель думала, абонент задал новый вопрос: старый ответ
+        # уже не к месту и не должен перебить память диалога.
+        return
+
+    reply = reply_for_faq_id(choice.faq_id, refused.lang, chat_id=chat_id)
+    if reply is None:                              # pragma: no cover
+        return
+    conversation().serve(chat_id, reply.faq_id, "button")
+    logger.info("чат %s: второе мнение модели — тема %d", chat_id, reply.faq_id)
+    screen = presentation.answer_card(
+        reply, mark="🤖", note=SECOND_OPINION_NOTE.get(reply.lang,
+                                                      SECOND_OPINION_NOTE["ru"]))
+    if await _rewrite(handle, screen) == "failed":
+        logger.info("чат %s: переписать отказ не удалось, остались кнопки",
+                    chat_id)
+
+
 # --------------------------------------------------------------------------
 # Передача оператору: карточка в его чат и реплай обратно абоненту
 # --------------------------------------------------------------------------
@@ -1713,6 +1776,7 @@ async def _on_text(update: Any, context: Any) -> None:
     # Ответ уже у абонента. Переформулировка — отдельным шагом после,
     # чтобы сетевой вызов не задерживал показ готового ответа.
     await _polish(chat_id, flow.handle(chat_id))
+    await _second_opinion(chat_id, flow.handle(chat_id))
 
 
 #: Какое уведомление показать на каждый неудачный статус распознавания.
