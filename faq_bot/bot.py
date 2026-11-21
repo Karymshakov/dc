@@ -1641,7 +1641,10 @@ async def _on_why(update: Any, context: Any) -> None:
     """/why — разбор решения: язык, оба метода поиска, пороги."""
     chat_id = update.effective_chat.id
     text = " ".join(getattr(context, "args", None) or ())
-    await _send(update.effective_message, why_screen(chat_id, text))
+    screen = why_screen(chat_id, text)
+    # В лог идёт только факт и размер: текст вопроса не логируется нигде.
+    logger.info("/why: разбор отправлен, %d знаков", len(screen.text))
+    await _send(update.effective_message, screen)
 
 
 async def _on_reset(update: Any, context: Any) -> None:
