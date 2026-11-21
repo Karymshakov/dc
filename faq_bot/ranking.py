@@ -263,6 +263,11 @@ def default_ranker(method: str = DEFAULT_METHOD) -> Ranker:
     return _RANKERS[method]
 
 
+def reset_rankers() -> None:
+    """Забыть собранные индексы: база изменилась (обучение в CRM, тесты)."""
+    _RANKERS.clear()
+
+
 def decide(text: str) -> Decision:
     """Решение по вопросу лучшим методом. Точка входа для answer()."""
     return default_ranker().decide(text)

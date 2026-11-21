@@ -192,12 +192,10 @@ class Learner:
     @staticmethod
     def apply(mapping: dict[int, tuple[str, ...]]) -> None:
         """Включить слой в рабочем боте: сбросить кэши базы и ранжировщика."""
-        from faq_bot import answer, ranking
+        from faq_bot import answer
 
         knowledge.set_learned(mapping)
-        ranking._RANKERS.clear()
         answer.reload_knowledge()
-        answer._fallback_instance = None
 
     @staticmethod
     def mapping(rows: list[dict[str, Any]]) -> dict[int, tuple[str, ...]]:

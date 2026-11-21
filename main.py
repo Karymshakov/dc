@@ -118,7 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     # Аргументы eval отдаём инструменту целиком: argparse иначе пытается
     # разобрать его «--split» сам и падает на незнакомом ключе.
-    if arguments and arguments[0] == "eval" and "-h" not in arguments[1:]             and "--help" not in arguments[1:]:
+    wants_help = "-h" in arguments[1:] or "--help" in arguments[1:]
+    if arguments and arguments[0] == "eval" and not wants_help:
         return command_eval(arguments[1:])
     args = build_parser().parse_args(arguments)
     return int(args.handler(args))
